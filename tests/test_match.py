@@ -59,6 +59,37 @@ def test_start_scores_favor_close_games():
     assert 0 < min(clocks) and max(clocks) <= 300 and np.mean(np.array(clocks) < 60) > 0.1
 
 
+def _done_flags(env, steps=1):
+    noop = {a: np.array([8]) for a in env.agents}
+    for _ in range(steps):
+        _, _, term, trunc = env.step(noop)
+    return all(term.values()), all(trunc.values())
+
+
+def test_match_end_terminates_and_cutoffs_truncate():
+    """PPO bootstraps the value after a truncation but not after a termination; mixing them up would teach
+    the bot that stalling the ball until the no-touch cutoff ends all future reward."""
+    env = make_env(coordination=False, seed=0)
+    env.reset()
+    env.shared_info["match"] = new_match(blue=1, time_remaining=DT / 2)  # ball rests at kickoff: clock is paused
+    s = copy.deepcopy(env.state)
+    s.ball.linear_velocity = np.array([0, 0, -10], dtype=np.float32)
+    s.ball.position = np.array([1000, 0, 93], dtype=np.float32)
+    env.transition_engine.set_state(s, env.shared_info)
+    assert _done_flags(env) == (True, False)
+    assert env.shared_info["match"]["winner"] == "blue"
+
+    no_touch, timeout = env.truncation_cond.conditions
+    for cond in (no_touch, timeout):
+        env.reset()
+        env.shared_info["match"] = new_match(time_remaining=200)
+        if cond is no_touch:
+            cond.last_touch_tick -= 30 * 120
+        else:
+            cond.initial_tick -= 600 * 120
+        assert _done_flags(env) == (False, True), type(cond).__name__
+
+
 def test_goal_in_env_resets_to_kickoff_without_ending_episode():
     env = make_env(coordination=False, seed=0)
     env.reset()

@@ -6,7 +6,7 @@ Computed once per tick next to TTB and roles so the reward and the overlay see t
 import numpy as np
 
 from .ball_prediction import SLICE_TIMES
-from .roles import FIRST, SECOND
+from .roles import FIRST, SECOND, is_kickoff
 
 DOUBLE_COMMIT_TTB = 0.6  # both teammates below this TTB...
 CLOSING_SPEED = 500.0  # ...and both closing on the ball faster than this (uu/s)
@@ -55,6 +55,8 @@ class CoordinationTracker:
         "revoked": {agent: excused steps now penalized} or None,
         "nobody_challenging": penalized agent or None, "nobody_home": bool}."""
         ball = state.ball.position
+        if is_kickoff(state):  # a possession never runs across a goal and the kickoff wait
+            self.last_toucher, self.possession_time = None, 0.0
         touchers = [a for a, c in state.cars.items() if c.ball_touches > 0]
         if touchers:
             toucher = min(touchers, key=lambda a: np.linalg.norm(state.cars[a].physics.position - ball))

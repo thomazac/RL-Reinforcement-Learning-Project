@@ -15,7 +15,7 @@ def car(team, pos, vel=(0, 0, 0), touches=0):
 
 
 def state(cars, ball=(0, 0, 93)):
-    return NS(cars=cars, ball=NS(position=np.array(ball, float)))
+    return NS(cars=cars, ball=NS(position=np.array(ball, float), linear_velocity=np.zeros(3)))
 
 
 def still(ball=(0, 0, 93)):
@@ -117,3 +117,15 @@ def test_nobody_challenging_after_opponent_keeps_possession():
     assert update(tracker, state(cars, ball), ttb, still(ball), n=4)[0]["nobody_challenging"] == "b0"
     cars["b0"] = car(0, (0, -4800, 17), (0, 1000, 0))  # now closing on the ball
     assert update(tracker, state(cars, ball), ttb, still(ball))[0]["nobody_challenging"] is None
+
+
+def test_possession_resets_at_kickoff():
+    ball = (0, -1000, 93)
+    cars = {"b0": car(0, (0, -4800, 17)), "b1": car(0, (300, -4900, 17)),
+            "o0": car(1, (0, -900, 17), touches=1), "o1": car(1, (0, 2000, 17))}
+    tracker, ttb = CoordinationTracker(), dict.fromkeys(cars, 2.0)
+    update(tracker, state(cars, ball), ttb, still(ball), n=10)
+    assert tracker.last_toucher == "o0" and tracker.possession_time > 0
+    cars["o0"].ball_touches = 0
+    update(tracker, state(cars), ttb, still())  # ball back at center, at rest: kickoff
+    assert tracker.last_toucher is None and tracker.possession_time == 0
