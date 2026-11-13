@@ -6,9 +6,15 @@ from .ball_prediction import SLICE_TIMES, TICK_RATE, BallPredictor
 
 # Fitted on GC1 2s replays with scripts/validate_ttb.py --calibrate.
 CONTACT_DIST = 200.0  # ball radius plus the car's reach, xy plane
-# The fit prefers ~0.05 because touchers are usually already facing the ball; 0.15 keeps
-# turning costly for cars facing away at nearly the same held-out role ranking.
-TURN_TIME_PER_RAD = 0.15
+# Turn constants come from scripts/measure_turns.py, not replays: replay touchers were mostly
+# already facing the ball, which pulls a replay fit far below what the game allows.
+# The scripted driver never half-flips, so its times bound real ones from above; a half-flip
+# helps from rest but not at speed, so the values lean toward the measured times at speed.
+TURN_TIME_LOW = 0.30  # s/rad at rest; ground turn rate is speed x curvature, so a parked car turns slowly
+TURN_TIME_HIGH = 0.50  # s/rad for a full U-turn at max speed
+AIR_TURN_TIME = 0.18  # s/rad; the 5.5 rad/s angular velocity cap, reachable only in the air
+GROUND_TURN_RATE = 2.0  # rad/s, roughly constant above ~500 uu/s, so turn radius ~ speed / 2
+INSIDE_DECEL = 2300.0  # uu/s^2 shed while sliding when the target is inside the turning circle
 GROUND_REACH_DZ = 110.0  # ball height above the car hittable without jumping
 JUMP_REACH_DZ = 360.0  # ball height above the car hittable with a single jump
 JUMP_TIME = 0.15
@@ -44,14 +50,17 @@ def _build_distance_table() -> np.ndarray:
 _DISTANCE = _build_distance_table()
 
 
-def estimate_ttb(car_pos, car_vel, car_fwd, boost, demoed, ball_slices, slice_times=SLICE_TIMES) -> np.ndarray:
+def estimate_ttb(car_pos, car_vel, car_fwd, boost, demoed, ball_slices, slice_times=SLICE_TIMES,
+                 on_ground=None) -> np.ndarray:
     """TTB in seconds for each car; inf if the ball is unreachable within the horizon.
 
-    car_pos, car_vel, car_fwd: (n, 3). boost: (n,) in 0-100. demoed: (n,) bool.
+    car_pos, car_vel, car_fwd: (n, 3). boost: (n,) in 0-100. demoed, on_ground: (n,) bool;
+    on_ground defaults to car height below 60 uu (replays carry no wheel-contact flag).
     ball_slices: predicted ball positions at slice_times (k,), starting at t=0; either (k, 3)
     shared by all cars or (n, k, 3) per car.
     """
     car_pos, car_vel, car_fwd = (np.asarray(x, dtype=np.float64) for x in (car_pos, car_vel, car_fwd))
+    grounded = (car_pos[:, 2] < 60 if on_ground is None else np.asarray(on_ground, dtype=bool))[:, None]
     boost = np.asarray(boost, dtype=np.float64)
     ball = np.asarray(ball_slices, dtype=np.float64)
     if ball.ndim == 2:
@@ -66,7 +75,7 @@ def estimate_ttb(car_pos, car_vel, car_fwd, boost, demoed, ball_slices, slice_ti
     fwd = fwd / np.maximum(np.linalg.norm(fwd, axis=-1, keepdims=True), 1e-6)
     angle = np.arccos(np.clip((direction * fwd).sum(-1), -1.0, 1.0))
     angle = np.where(need > 0, angle, 0.0)
-    v0 = np.clip((car_vel[:, None, :2] * direction).sum(-1), 0.0, MAX_SPEED)
+    v_toward = (car_vel[:, None, :2] * direction).sum(-1)
 
     # Height is relative to the car, so a car already in the air or on the wall needs no rise.
     dz = ball[..., 2] - car_pos[:, None, 2]
@@ -74,8 +83,23 @@ def estimate_ttb(car_pos, car_vel, car_fwd, boost, demoed, ball_slices, slice_ti
     jump_time = np.where(dz > GROUND_REACH_DZ, JUMP_TIME, 0.0)
     boost_needed = np.where(dz > JUMP_REACH_DZ, MIN_AERIAL_BOOST + rise_time * BOOST_PER_SEC, 0.0)
 
+    # On the ground a car curving toward the target keeps part of its speed: all of it straight
+    # ahead, none after a U-turn. In the air steering doesn't bend the velocity.
+    speed = np.linalg.norm(car_vel[:, :2], axis=1, keepdims=True)
+    v0 = np.clip(np.where(grounded, np.maximum(v_toward, speed * np.cos(angle / 2)), v_toward), 0.0, MAX_SPEED)
+    speed_frac = np.minimum(speed / MAX_SPEED, 1.0)
+    ground_turn = TURN_TIME_LOW + (TURN_TIME_HIGH - TURN_TIME_LOW) * speed_frac * angle / np.pi
+    turn_time_per_rad = np.where(grounded, ground_turn, AIR_TURN_TIME)
+
+    # A target inside the turning circle can't be reached by steering; the car must shed speed first.
+    cross = fwd[..., 0] * direction[..., 1] - fwd[..., 1] * direction[..., 0]
+    side = np.stack([-fwd[..., 1], fwd[..., 0]], axis=-1) * np.where(cross >= 0, 1.0, -1.0)[..., None]
+    radius = speed / GROUND_TURN_RATE
+    inside = grounded & (angle > 0.1) & (np.linalg.norm(to_ball - side * radius[..., None], axis=-1) < radius)
+    slide_time = np.where(inside, speed / INSIDE_DECEL, 0.0)
+
     # Driving and rising overlap: both must be finished by the slice time.
-    tau = slice_times[None, :] - TURN_TIME_PER_RAD * angle - jump_time
+    tau = slice_times[None, :] - turn_time_per_rad * angle - slide_time - jump_time
     vi = np.clip(np.rint(v0 / _V_STEP).astype(int), 0, len(_V_GRID) - 1)
     bi = np.clip(np.rint(boost / _B_STEP).astype(int), 0, len(_B_GRID) - 1)[:, None]
     ti = np.clip(np.rint(tau * TICK_RATE).astype(int), 0, _N_TICKS)
@@ -103,7 +127,7 @@ def ttb_from_state(state, predictor: BallPredictor):
     ids = list(state.cars)
     cars = [state.cars[i] for i in ids]
     ball = state.ball
-    slices = predictor.predict(ball.position, ball.linear_velocity, ball.angular_velocity)
+    slices = predictor.predict(ball.position, ball.linear_velocity, ball.angular_velocity, state.tick_count)
     ttb = estimate_ttb(
         np.array([c.physics.position for c in cars]),
         np.array([c.physics.linear_velocity for c in cars]),
@@ -111,5 +135,6 @@ def ttb_from_state(state, predictor: BallPredictor):
         np.array([c.boost_amount for c in cars]),
         np.array([c.is_demoed for c in cars]),
         slices,
+        on_ground=np.array([c.on_ground for c in cars]),
     )
     return dict(zip(ids, ttb)), slices

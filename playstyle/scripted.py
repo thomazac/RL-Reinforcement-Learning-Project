@@ -9,7 +9,8 @@ from .roles import FIRST
 GOAL_Y = 5120.0
 _TABLE = LookupTableAction.make_lookup_table()
 # Ground rows are [throttle, steer, 0, steer, 0, 0, boost, handbrake].
-_GROUND = {(r[1], r[6], r[7]): i for i, r in enumerate(_TABLE) if r[0] == 1 and r[2] == r[4] == r[5] == 0}
+_GROUND = {(r[0], r[1], r[6], r[7]): i for i, r in enumerate(_TABLE) if r[2] == r[4] == r[5] == 0}
+GROUND_TURN_RATE = 2.0  # rad/s; roughly constant above ~500 uu/s, so turn radius ~ speed / 2
 
 
 class RoleBot:
@@ -41,6 +42,12 @@ class RoleBot:
         fwd = car.physics.forward[:2]
         angle = np.arctan2(fwd[0] * to[1] - fwd[1] * to[0], fwd @ to)
         steer = 0 if abs(angle) < 0.1 else (1 if angle > 0 else -1)
+        # A target inside the turning circle cannot be reached by steering alone; slide instead of orbiting.
+        radius = np.linalg.norm(car.physics.linear_velocity[:2]) / GROUND_TURN_RATE
+        side = np.array([-fwd[1], fwd[0]]) * (1 if angle > 0 else -1)
+        inside = steer != 0 and np.linalg.norm(to - side * radius) < radius
+        if inside:
+            return _GROUND[(0, steer, 0, 1)]
         use_boost = int(boost and abs(angle) < 0.3)
         handbrake = int(abs(angle) > 1.8)
-        return _GROUND[(steer, use_boost, handbrake)]
+        return _GROUND[(1, steer, use_boost, handbrake)]
