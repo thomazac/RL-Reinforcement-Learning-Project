@@ -19,7 +19,8 @@ DEMO_AIM_MARGIN = np.radians(5)  # average (intercept angle - opponent angle) mu
 AIM_MEMORY = 0.5  # s, time constant of that average
 IN_LINE_COS = 0.97  # ~14 degrees
 # The demo excuse is judged on outcome: if a car whose aim earned it touches the ball this soon after the
-# last excused step, every excused step is charged to the second man after all.
+# last excused step, every excused step is charged to that car. Charging the second man instead would
+# teach him not to go for the ball while his teammate hunts nearby.
 DEMO_EXCUSE_WINDOW = 0.5
 POSSESSION_DIST = 300.0  # ball within this of the last toucher counts as controlled possession
 NOBODY_CHALLENGING_TIME = 1.5  # s of opponent possession before "nobody challenging" fires
@@ -47,7 +48,7 @@ class CoordinationTracker:
     def reset(self):
         self.last_toucher, self.possession_time = None, 0.0
         self.aim_preference = {}  # agent -> running average of how much more it aims at an opponent than the ball
-        self.pending = {}  # team -> {"hunters": set, "steps": {second man: excused steps}, "left": s}
+        self.pending = {}  # team -> {"hunters": set, "steps": excused steps, "left": s}
 
     def update(self, state, ttb, roles, slices, dt) -> dict:
         """Per team: {"double_commit": penalized agent or None, "excused": reason or None,
@@ -89,15 +90,16 @@ class CoordinationTracker:
                     if ev["excused"] is None:
                         ev["double_commit"] = second
                     elif ev["excused"] == "demo":
-                        p = self.pending.setdefault(team, {"hunters": set(), "steps": {}})
+                        p = self.pending.setdefault(team, {"hunters": set(), "steps": 0})
                         p["hunters"].update(hunters)
-                        p["steps"][second] = p["steps"].get(second, 0) + 1
+                        p["steps"] += 1
                         p["left"] = DEMO_EXCUSE_WINDOW + dt
             p = self.pending.get(team)
             if p is not None:
                 p["left"] -= dt
-                if p["hunters"] & set(touchers):
-                    ev["revoked"] = p["steps"]
+                broke = [a for a in touchers if a in p["hunters"]]
+                if broke:
+                    ev["revoked"] = {broke[0]: p["steps"]}
                     del self.pending[team]
                 elif p["left"] <= 0:
                     del self.pending[team]

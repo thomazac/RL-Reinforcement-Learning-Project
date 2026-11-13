@@ -30,9 +30,9 @@ def converging(b1_pos=(-500, -500, 17), b1_vel=(1000, 1000, 0)):
             "o0": car(1, (0, 3000, 17)), "o1": car(1, (0, 4000, 17))}
 
 
-def update(tracker, s, ttb, slices, n=1):
+def update(tracker, s, ttb, slices, n=1, roles=ROLES):
     for _ in range(n):
-        events = tracker.update(s, ttb, ROLES, slices, DT)
+        events = tracker.update(s, ttb, roles, slices, DT)
     return events
 
 
@@ -66,20 +66,22 @@ def test_double_commit_excused_for_demo_play():
     assert ev["double_commit"] is None and ev["excused"] == "demo"
 
 
-def demo_excused_tracker(n):
+def demo_excused_tracker(n, roles=ROLES):
     cars = converging()
     cars["o0"] = car(1, (1500, 0, 17))
     cars["b1"] = car(0, (-500, -500, 17), (1500, 375, 0))
     tracker = CoordinationTracker()
-    update(tracker, state(cars), TTB_CLOSE, still(), n=n)
+    update(tracker, state(cars), TTB_CLOSE, still(), n=n, roles=roles)
     return tracker, cars
 
 
-def test_demo_excuse_revoked_when_hunter_touches_ball():
-    tracker, cars = demo_excused_tracker(20)
-    cars["b1"] = car(0, (0, -100, 17), touches=1)
-    ev = update(tracker, state(cars), {**TTB_CLOSE, "b1": 2.0}, still())[0]
-    assert ev["revoked"] == {"b1": 20 - 1}  # the excuse needs a step of aim history before it applies
+def test_demo_excuse_revoked_and_charged_to_the_hunter_that_touches_ball():
+    hunter_is_first = {**ROLES, "b0": SECOND, "b1": FIRST}
+    for roles in (ROLES, hunter_is_first):
+        tracker, cars = demo_excused_tracker(20, roles)
+        cars["b1"] = car(0, (0, -100, 17), touches=1)
+        ev = update(tracker, state(cars), {**TTB_CLOSE, "b1": 2.0}, still(), roles=roles)[0]
+        assert ev["revoked"] == {"b1": 20 - 1}  # the excuse needs a step of aim history before it applies
 
 
 def test_demo_excuse_stands_when_teammate_touches_or_window_passes():

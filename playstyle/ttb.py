@@ -6,15 +6,15 @@ from .ball_prediction import SLICE_TIMES, TICK_RATE, BallPredictor
 
 # Fitted on GC1 2s replays with scripts/validate_ttb.py --calibrate.
 CONTACT_DIST = 200.0  # ball radius plus the car's reach, xy plane
-# Turn constants come from scripts/measure_turns.py, not replays: replay touchers were mostly
-# already facing the ball, which pulls a replay fit far below what the game allows.
-# The scripted driver never half-flips, so its times bound real ones from above; a half-flip
-# helps from rest but not at speed, so the values lean toward the measured times at speed.
-TURN_TIME_LOW = 0.30  # s/rad at rest; ground turn rate is speed x curvature, so a parked car turns slowly
-TURN_TIME_HIGH = 0.50  # s/rad for a full U-turn at max speed
+# Ground turn constants are fitted on committed ground touches in GC1 replays (lead <= 1 s; at longer
+# leads humans aren't hurrying yet), bounded by scripts/measure_turns.py: the scripted driver never
+# powerslides or flips, so the model must not be slower than it. The per-radian cost rises with
+# angle and speed, so big turns at speed cost the most without a separately fitted value per angle.
+TURN_TIME_LOW = 0.25  # s/rad at rest; ground turn rate is speed x curvature, so a parked car turns slowly
+TURN_TIME_HIGH = 0.40  # s/rad for a full U-turn at max speed
 AIR_TURN_TIME = 0.18  # s/rad; the 5.5 rad/s angular velocity cap, reachable only in the air
 GROUND_TURN_RATE = 2.0  # rad/s, roughly constant above ~500 uu/s, so turn radius ~ speed / 2
-INSIDE_DECEL = 2300.0  # uu/s^2 shed while sliding when the target is inside the turning circle
+INSIDE_DECEL = 6000.0  # uu/s^2 shed while sliding when the target is inside the turning circle
 GROUND_REACH_DZ = 110.0  # ball height above the car hittable without jumping
 JUMP_REACH_DZ = 360.0  # ball height above the car hittable with a single jump
 JUMP_TIME = 0.15
