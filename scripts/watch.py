@@ -4,6 +4,11 @@
     python scripts/watch.py --policy random
     python scripts/watch.py --save runs/roles.gif --seconds 20
     python scripts/watch.py --no-draw --seconds 600           # role-change stats only
+    python scripts/watch.py --blue-mode chaser                # watch a deliberately bad team
+
+Labels show role (LOCK when the first man is committed), TTB and height. Marker size grows with
+height. Red marks show coordination events: double-commit on the penalized car, nobody challenging
+on the first man, nobody home next to the goal.
 """
 
 import argparse
@@ -14,7 +19,7 @@ import numpy as np
 from playstyle.ball_prediction import TICK_RATE
 from playstyle.env import TICK_SKIP, make_env
 from playstyle.roles import FIRST, MIN_HOLD
-from playstyle.scripted import RoleBot
+from playstyle.scripted import MODES, RoleBot
 
 FIELD_X, FIELD_Y, GOAL_HALF_W = 4096, 5120, 893
 COLORS = ("tab:blue", "tab:orange")
@@ -42,23 +47,43 @@ def draw(ax, state, info, t):
         ax.add_patch(Rectangle((-GOAL_HALF_W, y if team else y - 880), 2 * GOAL_HALF_W, 880, alpha=0.25, color=COLORS[team]))
 
     slices = info["ball_slices"]
+    ball = state.ball.position
     ax.plot(slices[:, 0], slices[:, 1], ":", color="0.4", lw=1)
-    ax.add_patch(Circle(state.ball.position[:2], 92.75, color="0.2"))
+    # Marker size grows with height so roles can be checked against aerial balls.
+    ax.add_patch(Circle(ball[:2], 92.75 * (1 + ball[2] / 700), color="0.2"))
+    ax.text(ball[0] + 150, ball[1] - 300, f"z {ball[2]:.0f}", fontsize=7, color="0.2")
 
+    coordination = info.get("coordination", {})
     for agent, car in state.cars.items():
         color = COLORS[car.team_num]
         if car.is_demoed:
             continue
         pos, ttb = car.physics.position, info["ttb"][agent]
-        ax.add_patch(Polygon(car_triangle(pos, car.physics.forward), color=color))
+        ax.add_patch(Polygon(car_triangle(pos, car.physics.forward, size=170 * (1 + pos[2] / 700)), color=color))
         first = info["roles"][agent] == FIRST
+        locked = first and info.get("role_locked", {}).get(car.team_num, False)
         if first:
-            ax.add_patch(Circle(pos[:2], 330, fill=False, color=color, lw=2.5))
+            ax.add_patch(Circle(pos[:2], 330, fill=False, color=color, lw=2.5, ls="-" if locked else "--"))
             k = min(round(ttb / 0.1), len(slices) - 1) if np.isfinite(ttb) else None
             if k is not None:
                 ax.plot([pos[0], slices[k, 0]], [pos[1], slices[k, 1]], "--", color=color, lw=1)
-        label = f"{'1st' if first else '2nd'} {ttb:.2f}s" if np.isfinite(ttb) else f"{'1st' if first else '2nd'} --"
-        ax.text(pos[0] + 250, pos[1] + 250, label, fontsize=8, color=color, weight="bold" if first else "normal")
+        role = ("1st LOCK" if locked else "1st") if first else "2nd"
+        ttb_text = f"{ttb:.2f}s" if np.isfinite(ttb) else "--"
+        ax.text(pos[0] + 250, pos[1] + 250, f"{role} {ttb_text} z{pos[2]:.0f}", fontsize=7, color=color,
+                weight="bold" if first else "normal")
+        ev = coordination.get(car.team_num, {})
+        if ev.get("double_commit") == agent:
+            ax.plot(*pos[:2], "x", color="red", ms=14, mew=3)
+            ax.text(pos[0] + 250, pos[1] - 150, "DOUBLE COMMIT", fontsize=7, color="red", weight="bold")
+        elif ev.get("excused") and info["roles"][agent] != FIRST:
+            ax.text(pos[0] + 250, pos[1] - 150, f"dc excused: {ev['excused']}", fontsize=7, color="0.45")
+        if ev.get("nobody_challenging") == agent:
+            ax.text(pos[0] + 250, pos[1] - 300, "NOBODY CHALLENGING", fontsize=7, color="red", weight="bold")
+
+    for team, ev in coordination.items():
+        if ev.get("nobody_home"):
+            y = -FIELD_Y - 650 if team == 0 else FIELD_Y + 450
+            ax.text(-1300, y, "NOBODY HOME", fontsize=9, color="red", weight="bold")
     ax.set_title(f"t = {t:6.1f}s{'   KICKOFF' if info['kickoff'] else ''}", fontsize=10)
 
 
@@ -93,10 +118,13 @@ def main():
     ap.add_argument("--save", help="write a GIF instead of opening a window")
     ap.add_argument("--no-draw", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--blue-mode", choices=MODES, default="normal")
+    ap.add_argument("--orange-mode", choices=MODES, default="normal")
     args = ap.parse_args()
 
     env = make_env()
-    bot, rng = RoleBot(seed=args.seed), np.random.default_rng(args.seed)
+    bot = RoleBot(seed=args.seed, team_modes={0: args.blue_mode, 1: args.orange_mode})
+    rng = np.random.default_rng(args.seed)
     env.reset()
     stats, frames = RoleStats(), []
 

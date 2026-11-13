@@ -35,6 +35,7 @@ def main():
     timed(provider.predictor, "predict", "ball prediction")
     timed(ttb_module, "estimate_ttb", "TTB")
     timed(provider.roles, "update", "roles")
+    timed(provider.coordination, "update", "coordination")
     timed(provider, "step", "shared-info provider total")
     timed(env.obs_builder, "build_obs", "observations")
     timed(env.reward_fn, "get_rewards", "reward")
