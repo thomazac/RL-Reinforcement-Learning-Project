@@ -15,7 +15,11 @@ _initialized = False
 def _ensure_init():
     global _initialized
     if not _initialized:
-        rs.init(os.path.join(os.path.dirname(_rlgym_engine.__file__), "collision_meshes"))
+        try:
+            rs.init(os.path.join(os.path.dirname(_rlgym_engine.__file__), "collision_meshes"))
+        except RuntimeError as e:  # RocketSimEngine may have initialized it already
+            if "Already inited" not in str(e):
+                raise
         _initialized = True
 
 

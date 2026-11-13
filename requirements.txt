@@ -5,6 +5,8 @@ rlgym-learn==2.0.0
 rlgym-learn-algos==0.4.2
 rocketsim==2.2.1
 numpy==1.26.4
+subtr-actor-py==1.5.1
+matplotlib==3.11.2
 python-dotenv
 requests
 pytest
