@@ -23,7 +23,6 @@ N_PLAYER_COLS = 14  # see subtr_actor.get_column_headers()
 CACHE = Path("data/ttb_samples.npz")
 SEARCH = {
     "CONTACT_DIST": [80, 110, 140, 170, 200, 240],
-    "TURN_TIME_PER_RAD": [0.05, 0.1, 0.15, 0.2, 0.25, 0.35, 0.45],
     "JUMP_TIME": [0.0, 0.05, 0.1, 0.15, 0.2, 0.3],
     "AERIAL_RISE_SPEED": [500, 700, 900, 1200, 1500, 2000],
     "MIN_AERIAL_BOOST": [0, 5, 10, 20],
@@ -139,6 +138,23 @@ def report(s, title):
             err = pred[fin] - lead[fin]
             print(f"  {name:7s} n={m.sum():5d} inf%={100 * (1 - fin.sum() / m.sum()):5.1f} "
                   f"bias={err.mean():+.2f} MAE={np.abs(err).mean():.2f}")
+    # A human did reach the ball in `lead`, so positive error means the model is too slow; negative error
+    # can just be a human not hurrying.
+    print("Ground touches (lead <= 1.0 s) by toucher's angle to the ball at the touch, and speed:")
+    car = s["pos"][idx, s["toucher"]]
+    fwd, vel = s["fwd"][idx, s["toucher"]], s["vel"][idx, s["toucher"]]
+    to_ball = s["slices"][idx, np.minimum(np.rint(lead / 0.1).astype(int), s["slices"].shape[1] - 1)] - car
+    cos = (fwd[:, :2] * to_ball[:, :2]).sum(1) / np.maximum(np.linalg.norm(to_ball[:, :2], axis=1), 1e-6)
+    angle = np.degrees(np.arccos(np.clip(cos, -1, 1)))
+    speed = np.linalg.norm(vel, axis=1)
+    ground = (lead <= 1.0) & (z < 160) & (car[:, 2] < 60) & np.isfinite(pred)
+    for lo, hi in ((0, 30), (30, 60), (60, 90), (90, 135), (135, 181)):
+        for slo, shi in ((0, 1000), (1000, 1800), (1800, 9999)):
+            m = ground & (angle >= lo) & (angle < hi) & (speed >= slo) & (speed < shi)
+            if m.sum() >= 20:
+                err = pred[m] - lead[m]
+                print(f"  {lo:3d}-{min(hi, 180):3d} deg, speed {slo:4d}-{shi:4d}: n={m.sum():5d} "
+                      f"bias={err.mean():+.2f} median={np.median(err):+.2f} too slow by >0.2 s: {(err > 0.2).mean() * 100:4.1f}%")
 
 
 def calibrate(s, rounds=3):

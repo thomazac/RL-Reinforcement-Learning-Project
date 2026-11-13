@@ -18,6 +18,9 @@ DEMO_AIM_COS = 0.9
 DEMO_AIM_MARGIN = np.radians(5)  # average (intercept angle - opponent angle) must exceed this
 AIM_MEMORY = 0.5  # s, time constant of that average
 IN_LINE_COS = 0.97  # ~14 degrees
+# The demo excuse is judged on outcome: if a car whose aim earned it touches the ball this soon after the
+# last excused step, every excused step is charged to the second man after all.
+DEMO_EXCUSE_WINDOW = 0.5
 POSSESSION_DIST = 300.0  # ball within this of the last toucher counts as controlled possession
 NOBODY_CHALLENGING_TIME = 1.5  # s of opponent possession before "nobody challenging" fires
 CHALLENGE_SPEED = 300.0  # a teammate closing faster than this counts as challenging
@@ -44,9 +47,11 @@ class CoordinationTracker:
     def reset(self):
         self.last_toucher, self.possession_time = None, 0.0
         self.aim_preference = {}  # agent -> running average of how much more it aims at an opponent than the ball
+        self.pending = {}  # team -> {"hunters": set, "steps": {second man: excused steps}, "left": s}
 
     def update(self, state, ttb, roles, slices, dt) -> dict:
         """Per team: {"double_commit": penalized agent or None, "excused": reason or None,
+        "revoked": {agent: excused steps now penalized} or None,
         "nobody_challenging": penalized agent or None, "nobody_home": bool}."""
         ball = state.ball.position
         touchers = [a for a, c in state.cars.items() if c.ball_touches > 0]
@@ -70,7 +75,8 @@ class CoordinationTracker:
             ids = [a for a, c in state.cars.items() if c.team_num == team]
             if not ids:
                 continue
-            ev = {"double_commit": None, "excused": None, "nobody_challenging": None, "nobody_home": False}
+            ev = {"double_commit": None, "excused": None, "revoked": None,
+                  "nobody_challenging": None, "nobody_home": False}
             first = next((a for a in ids if roles[a] == FIRST), None)
             second = next((a for a in ids if roles[a] == SECOND), None)
 
@@ -78,10 +84,23 @@ class CoordinationTracker:
                 both = all(ttb[a] < DOUBLE_COMMIT_TTB and _closing(state.cars[a], ball) > CLOSING_SPEED
                            for a in (first, second))
                 if both:
-                    ev["excused"] = self._double_commit_excuse(
-                        team, slices, [(aim[a][0], self.aim_preference[a], aim[a][2]) for a in (first, second)])
+                    ev["excused"], hunters = self._double_commit_excuse(
+                        team, slices, {a: (aim[a][0], self.aim_preference[a], aim[a][2]) for a in (first, second)})
                     if ev["excused"] is None:
                         ev["double_commit"] = second
+                    elif ev["excused"] == "demo":
+                        p = self.pending.setdefault(team, {"hunters": set(), "steps": {}})
+                        p["hunters"].update(hunters)
+                        p["steps"][second] = p["steps"].get(second, 0) + 1
+                        p["left"] = DEMO_EXCUSE_WINDOW + dt
+            p = self.pending.get(team)
+            if p is not None:
+                p["left"] -= dt
+                if p["hunters"] & set(touchers):
+                    ev["revoked"] = p["steps"]
+                    del self.pending[team]
+                elif p["left"] <= 0:
+                    del self.pending[team]
 
             if controlled and holder.team_num != team and self.possession_time > NOBODY_CHALLENGING_TIME \
                     and first is not None \
@@ -102,8 +121,9 @@ class CoordinationTracker:
         intercept rather than the ball's current position, so that is what the opponent is compared to."""
         ids = list(state.cars)
         cars = [state.cars[a] for a in ids]
-        pos = np.array([c.physics.position for c in cars], dtype=np.float64)
-        vel = np.array([c.physics.linear_velocity for c in cars], dtype=np.float64)
+        # Ground plane only: in 3D, a ball 76 uu above the car reads as several degrees off a car driving straight at it.
+        pos = np.array([c.physics.position[:2] for c in cars], dtype=np.float64)
+        vel = np.array([c.physics.linear_velocity[:2] for c in cars], dtype=np.float64)
         team = np.array([c.team_num for c in cars])
         demoed = np.array([c.is_demoed for c in cars])
         speed = np.linalg.norm(vel, axis=1)
@@ -111,7 +131,7 @@ class CoordinationTracker:
 
         t = np.array([ttb[a] for a in ids], dtype=np.float64)
         k = np.where(np.isfinite(t), np.minimum(np.searchsorted(SLICE_TIMES, np.nan_to_num(t, posinf=0)), len(slices) - 1), 0)
-        to_intercept = slices[k] - pos
+        to_intercept = slices[k, :2] - pos
         intercept_dist = np.linalg.norm(to_intercept, axis=1)
         ball_angle = np.arccos(np.clip((heading * to_intercept).sum(1) / np.maximum(intercept_dist, 1e-6), -1, 1))
 
@@ -131,14 +151,13 @@ class CoordinationTracker:
 
     @staticmethod
     def _double_commit_excuse(team, slices, aims):
-        """aims: (cosine to best-aimed opponent, aim preference, opponent nearer than intercept) for both
-        teammates. Either one on a demo path means they are not both going for the ball, whichever role
-        TTB gave it."""
+        """aims: agent -> (cosine to best-aimed opponent, aim preference, opponent nearer than intercept) for
+        both teammates. Returns (reason or None, agents on a demo path). Either one on a demo path means they
+        are not both going for the ball, whichever role TTB gave it; the outcome check revokes it otherwise."""
         sign = _own_goal_sign(team)
         soon = slices[SLICE_TIMES <= OWN_NET_HORIZON]
         if np.any((soon[:, 1] * sign > GOAL_Y) & (np.abs(soon[:, 0]) < GOAL_HALF_W) & (soon[:, 2] < GOAL_H)):
-            return "save"
-        for to_opp, preference, nearer in aims:
-            if (to_opp > DEMO_AIM_COS and preference > DEMO_AIM_MARGIN) or (to_opp > IN_LINE_COS and nearer):
-                return "demo"
-        return None
+            return "save", []
+        hunters = [a for a, (to_opp, preference, nearer) in aims.items()
+                   if (to_opp > DEMO_AIM_COS and preference > DEMO_AIM_MARGIN) or (to_opp > IN_LINE_COS and nearer)]
+        return ("demo" if hunters else None), hunters

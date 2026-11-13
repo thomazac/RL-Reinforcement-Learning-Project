@@ -66,6 +66,34 @@ def test_double_commit_excused_for_demo_play():
     assert ev["double_commit"] is None and ev["excused"] == "demo"
 
 
+def demo_excused_tracker(n):
+    cars = converging()
+    cars["o0"] = car(1, (1500, 0, 17))
+    cars["b1"] = car(0, (-500, -500, 17), (1500, 375, 0))
+    tracker = CoordinationTracker()
+    update(tracker, state(cars), TTB_CLOSE, still(), n=n)
+    return tracker, cars
+
+
+def test_demo_excuse_revoked_when_hunter_touches_ball():
+    tracker, cars = demo_excused_tracker(20)
+    cars["b1"] = car(0, (0, -100, 17), touches=1)
+    ev = update(tracker, state(cars), {**TTB_CLOSE, "b1": 2.0}, still())[0]
+    assert ev["revoked"] == {"b1": 20 - 1}  # the excuse needs a step of aim history before it applies
+
+
+def test_demo_excuse_stands_when_teammate_touches_or_window_passes():
+    tracker, cars = demo_excused_tracker(20)
+    cars["b0"] = car(0, (0, -100, 17), touches=1)
+    cars["b1"] = car(0, (1400, 0, 17))
+    far = {**TTB_CLOSE, "b0": 2.0, "b1": 2.0}
+    assert update(tracker, state(cars), far, still())[0]["revoked"] is None
+    cars["b0"].ball_touches = 0
+    update(tracker, state(cars), far, still(), n=int(0.5 / DT) + 1)
+    cars["b1"] = car(0, (0, -100, 17), touches=1)
+    assert update(tracker, state(cars), far, still())[0]["revoked"] is None
+
+
 def test_nobody_home_when_both_in_front_of_ball_in_own_third():
     cars = {"b0": car(0, (0, 0, 17)), "b1": car(0, (500, -1000, 17)), "o0": car(1, (0, -3500, 17)),
             "o1": car(1, (0, 3000, 17))}
