@@ -8,7 +8,7 @@ from playstyle import ttb_v1
 
 def _env_after(steps=30, seed=0):
     rng = np.random.default_rng(seed)
-    env = make_env(coordination=False)
+    env = make_env(coordination=False, seed=seed)
     env.reset()
     for _ in range(steps):
         env.step({a: np.array([rng.integers(90)]) for a in env.agents})
@@ -36,6 +36,8 @@ def _mirror_state(env):
     info["obs_ttb"] = {swap[a]: t for a, t in env.shared_info["obs_ttb"].items()}
     info["obs_ball_slices"] = env.shared_info["obs_ball_slices"] * np.array([-1, -1, 1])
     info["prev_action"] = {swap[a]: p for a, p in env.shared_info["prev_action"].items()}
+    m = env.shared_info["match"]
+    info["match"] = {**m, "blue": m["orange"], "orange": m["blue"], "score_diff": -m["score_diff"]}
     return s, info, swap
 
 
@@ -48,6 +50,7 @@ def test_shape_and_finite():
 
 def test_orange_sees_the_mirror_of_what_blue_sees():
     env = _env_after()
+    assert env.shared_info["match"]["score_diff"] != 0  # seed 0 starts uneven, so the score flip is covered
     builder = EntityObs()
     real = builder.build_obs(env.agents, env.state, env.shared_info)
     s, info, swap = _mirror_state(env)
@@ -61,6 +64,18 @@ def test_teammate_is_relative_to_self():
     o = env.obs_builder.build_obs(["blue-0"], env.state, env.shared_info)["blue-0"]
     me, mate = env.state.cars["blue-0"].physics, env.state.cars["blue-1"].physics
     np.testing.assert_allclose(o[CAR_DIM:CAR_DIM + 3], (mate.position - me.position) / 2300, atol=1e-5)
+
+
+def test_ball_in_car_frame():
+    env = make_env(coordination=False)
+    env.reset()
+    o = env.obs_builder.build_obs(env.agents, env.state, env.shared_info)
+    off = 4 * CAR_DIM + 15
+    for agent, car in env.state.cars.items():
+        local = o[agent][off:off + 3] * 2300
+        d = env.state.ball.position - car.physics.position
+        np.testing.assert_allclose(np.linalg.norm(local), np.linalg.norm(d), rtol=1e-4)
+        assert local[0] > 0.9 * np.linalg.norm(d[:2])  # kickoff cars face the ball
 
 
 def test_unreachable_ttb_is_capped_with_flag_off():

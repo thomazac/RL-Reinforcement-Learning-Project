@@ -65,8 +65,9 @@ def run(mode, seconds, seed):
                 split["hunter touched" if episode["touched"] else "did not"] += 1
                 episode = None
 
-        if any(term.values()):
-            goals[0 if env.state.ball.position[1] > 0 else 1] += 1
+        scorer = env.shared_info["match"]["goal"]
+        if scorer:
+            goals[0 if scorer == "blue" else 1] += 1
         if any(term.values()) or any(trunc.values()):
             env.reset()
     minutes = seconds / 60

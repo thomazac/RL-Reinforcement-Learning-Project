@@ -66,16 +66,21 @@ def test_cached_prediction_matches_fresh_during_play():
     from playstyle.env import make_env
     from playstyle.scripted import RoleBot
 
+    import random
+    random.seed(1)
     np.random.seed(1)
-    env, bot, fresh = make_env(reward_ttb="live"), RoleBot(seed=1), BallPredictor()
+    env, bot, fresh = make_env(reward_ttb="live", seed=1), RoleBot(seed=1), BallPredictor()
     env.reset()
+    # Only the first second: after a bounce off a curved surface, sub-uu differences grow to ~100 uu by 3 s
+    # even between two fresh predictions made a few steps apart.
+    first_second = SLICE_TIMES <= 1.0
     for _ in range(600):
         _, _, term, trunc = env.step(bot.act(env.state, env.shared_info))
         if any(term.values()) or any(trunc.values()):
             env.reset()
         b = env.state.ball
         expected = fresh.predict(b.position, b.linear_velocity, b.angular_velocity)
-        np.testing.assert_allclose(env.shared_info["ball_slices"], expected, atol=2.0)
+        np.testing.assert_allclose(env.shared_info["ball_slices"][first_second], expected[first_second], atol=2.0)
     assert env.shared_info_provider.predictor.hits > 300
 
 

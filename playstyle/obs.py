@@ -5,8 +5,8 @@ Per agent, mirrored for orange so one policy plays both sides (x and y flipped):
                  has jump; demoed; TTB (scaled) and TTB reachable
   teammate   22  same, but position and velocity relative to self (world-aligned, not rotated)
   opponents  2x22, ordered by agent id
-  ball       24  position, velocity, angular velocity (absolute); position and velocity relative to self;
-                 predicted position at +0.5, +1, +2 s
+  ball       27  position, velocity, angular velocity (absolute); position and velocity relative to self;
+                 position in self's frame (forward, right, up); predicted position at +0.5, +1, +2 s
   global     46  34 boost pad timers; score difference; time remaining; overtime; kickoff; previous action (8)
 TTB and the ball prediction come from the frozen estimator (shared_info["obs_ttb"], ["obs_ball_slices"]).
 """
@@ -19,7 +19,7 @@ from rlgym.api import ActionParser, ObsBuilder
 from . import ttb_v1
 
 OBS_LAYOUT = "entity-v1"
-CAR_DIM, BALL_DIM, GLOBAL_DIM = 22, 24, 46
+CAR_DIM, BALL_DIM, GLOBAL_DIM = 22, 27, 46
 OBS_DIM = 4 * CAR_DIM + BALL_DIM + GLOBAL_DIM
 
 POS_COEF, VEL_COEF, ANG_VEL_COEF = 1 / 2300, 1 / 2300, 1 / 5.5
@@ -71,6 +71,7 @@ class EntityObs(ObsBuilder):
         ang = np.array([c.physics.angular_velocity for c in cars], dtype=np.float64)
         fwd = np.array([c.physics.forward for c in cars], dtype=np.float64)
         up = np.array([c.physics.up for c in cars], dtype=np.float64)
+        rot = np.array([c.physics.rotation_mtx for c in cars], dtype=np.float64)  # columns: forward, right, up
         flags = np.array([[c.boost_amount * BOOST_COEF, c.on_ground, c.has_flip, not c.has_jumped, c.is_demoed]
                           for c in cars], dtype=np.float64)
         ttb_cols = np.stack([ttb_scaled, reachable], axis=1)
@@ -103,6 +104,7 @@ class EntityObs(ObsBuilder):
             parts = [car_block(i, False)] + [car_block(j, True) for j in others] + [
                 bp * POS_COEF, bv * VEL_COEF, b_ang * m * ANG_VEL_COEF,
                 (bp - pos[i] * m) * POS_COEF, (bv - vel[i] * m) * VEL_COEF,
+                rot[i].T @ (b_pos - pos[i]) * POS_COEF,  # same on both sides: mirroring rotates car and ball alike
                 (predicted * m).ravel() * POS_COEF,
                 (pads[::-1] if orange else pads) * PAD_TIMER_COEF,
                 [np.clip(score, -SCORE_CAP, SCORE_CAP) / SCORE_CAP,
