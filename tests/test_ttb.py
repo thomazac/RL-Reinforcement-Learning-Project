@@ -67,7 +67,7 @@ def test_cached_prediction_matches_fresh_during_play():
     from playstyle.scripted import RoleBot
 
     np.random.seed(1)
-    env, bot, fresh = make_env(), RoleBot(seed=1), BallPredictor()
+    env, bot, fresh = make_env(reward_ttb="live"), RoleBot(seed=1), BallPredictor()
     env.reset()
     for _ in range(600):
         _, _, term, trunc = env.step(bot.act(env.state, env.shared_info))

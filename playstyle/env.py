@@ -11,7 +11,7 @@ from .shared_info import TTBRoleProvider
 TICK_SKIP = 8
 
 
-def make_env(team_size=2, obs_builder=None, reward_fn=None):
+def make_env(team_size=2, obs_builder=None, reward_fn=None, reward_ttb="v1", coordination=True):
     return RLGym(
         state_mutator=MutatorSequence(FixedTeamSizeMutator(team_size, team_size), KickoffMutator()),
         obs_builder=obs_builder or DefaultObs(zero_padding=None),
@@ -20,5 +20,5 @@ def make_env(team_size=2, obs_builder=None, reward_fn=None):
         termination_cond=GoalCondition(),
         truncation_cond=AnyCondition(NoTouchTimeoutCondition(30), TimeoutCondition(300)),
         transition_engine=RocketSimEngine(),
-        shared_info_provider=TTBRoleProvider(),
+        shared_info_provider=TTBRoleProvider(reward_ttb=reward_ttb, coordination=coordination),
     )

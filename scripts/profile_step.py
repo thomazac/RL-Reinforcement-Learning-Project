@@ -7,6 +7,7 @@ from collections import defaultdict
 import numpy as np
 
 import playstyle.ttb as ttb_module
+import playstyle.ttb_v1 as ttb_v1
 from playstyle.env import make_env
 
 T = defaultdict(float)
@@ -27,13 +28,18 @@ def timed(obj, name, key):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--steps", type=int, default=5000)
+    ap.add_argument("--reward-ttb", default="v1", choices=("v1", "live"))
+    ap.add_argument("--no-coordination", action="store_true", help="Phase 1a setup: no roles or coordination")
     args = ap.parse_args()
 
-    env = make_env()
+    env = make_env(reward_ttb=args.reward_ttb, coordination=not args.no_coordination)
     provider = env.shared_info_provider
     timed(env.transition_engine, "step", "physics (RocketSim)")
-    timed(provider.predictor, "predict", "ball prediction")
-    timed(ttb_module, "estimate_ttb", "TTB")
+    timed(provider.obs_predictor, "predict", "ball prediction (v1)")
+    timed(ttb_v1, "estimate_ttb", "TTB (v1)")
+    if provider.predictor is not None:
+        timed(provider.predictor, "predict", "ball prediction (live)")
+        timed(ttb_module, "estimate_ttb", "TTB (live)")
     timed(provider.roles, "update", "roles")
     timed(provider.coordination, "update", "coordination")
     timed(provider, "step", "shared-info provider total")
@@ -52,11 +58,10 @@ def main():
     total = time.perf_counter() - start
 
     print(f"{args.steps} env steps, {args.steps / total:.0f} env steps/s = "
-          f"{4 * args.steps / total:.0f} agent-steps/s (one process, random actions, no policy)")
+          f"{4 * args.steps / total:.0f} agent-steps/s (one process, random actions, no policy; "
+          f"reward_ttb={args.reward_ttb}, coordination={not args.no_coordination})")
     for key, v in sorted(T.items(), key=lambda kv: -kv[1]):
         print(f"  {key:28s} {v / args.steps * 1e6:7.0f} us/step  {v / total * 100:5.1f}%")
-    p = provider.predictor
-    print(f"ball prediction cache hit rate {p.hits / max(p.hits + p.misses, 1) * 100:.0f}%")
 
 
 if __name__ == "__main__":

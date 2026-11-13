@@ -49,10 +49,12 @@ def test_cache_tolerances():
 
 
 def test_checkpoint_versions(tmp_path, monkeypatch):
-    with pytest.raises(RuntimeError, match="no obs_versions"):
+    with pytest.raises(RuntimeError, match="no versions.json"):
         versions.check(tmp_path)
-    versions.write(tmp_path)
+    versions.write(tmp_path, "live")
     versions.check(tmp_path)
+    assert versions.reward_versions("live")["ttb"].startswith("ttb-live-")
+    assert versions.reward_versions("v1") == {"ttb": "ttb-v1"}
     monkeypatch.setitem(versions.OBS_VERSIONS, "ttb", "ttb-v2")
     with pytest.raises(RuntimeError, match="trained on"):
         versions.check(tmp_path)

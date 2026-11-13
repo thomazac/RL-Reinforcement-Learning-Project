@@ -2,49 +2,60 @@
 
 from rlgym.api import SharedInfoProvider
 
-from . import ttb_v1
-from .ball_prediction import TICK_RATE, BallPredictor
+from . import ttb, ttb_v1
+from .ball_prediction import BallPredictor
 from .coordination import CoordinationTracker
 from .roles import RoleTracker, is_kickoff
-from .ttb import ttb_from_state
-from .versions import OBS_VERSIONS
+from .versions import OBS_VERSIONS, REWARD_TTB, reward_versions
 
 
 class TTBRoleProvider(SharedInfoProvider):
-    """Writes shared_info["ttb"], ["roles"], ["role_locked"], ["coordination"], ["ball_slices"] and ["kickoff"]
-    from the live estimator (reward side), and ["obs_ttb"], ["obs_ball_slices"], ["obs_versions"] from the
-    frozen one (observation side)."""
+    """Always writes shared_info["obs_ttb"] and ["obs_ball_slices"] (frozen v1, observation side),
+    ["ttb"] and ["ball_slices"] (reward side), ["kickoff"], ["obs_versions"] and ["reward_versions"].
+    With coordination on, also ["roles"], ["role_locked"] and ["coordination"].
 
-    def __init__(self):
-        self.predictor = BallPredictor()
+    reward_ttb="v1" reuses the frozen estimate for the reward side; "live" runs playstyle/ttb.py separately.
+    Phase 1a has no coordination terms, so its workers skip roles and coordination.
+    """
+
+    def __init__(self, reward_ttb="v1", coordination=True):
+        if reward_ttb not in REWARD_TTB:
+            raise ValueError(f"reward_ttb must be one of {list(REWARD_TTB)}")
+        self.reward_ttb, self.use_coordination = reward_ttb, coordination
         self.obs_predictor = ttb_v1.BallPredictor()
+        self.predictor = BallPredictor() if reward_ttb == "live" else None
         self.roles = RoleTracker()
         self.coordination = CoordinationTracker()
         self._last_tick = 0
 
     def create(self, shared_info):
         shared_info["obs_versions"] = dict(OBS_VERSIONS)
+        shared_info["reward_versions"] = reward_versions(self.reward_ttb)
         return shared_info
 
     def set_state(self, agents, initial_state, shared_info):
-        ttb, slices = ttb_from_state(initial_state, self.predictor)
         self._last_tick = initial_state.tick_count
         self.coordination.reset()
-        roles = self.roles.reset(initial_state, ttb)
-        return self._write(shared_info, initial_state, ttb, slices, roles, 0.0)
+        return self._write(shared_info, initial_state, None)
 
     def step(self, agents, state, shared_info):
-        ttb, slices = ttb_from_state(state, self.predictor)
-        dt = (state.tick_count - self._last_tick) / TICK_RATE
+        dt = (state.tick_count - self._last_tick) / ttb_v1.TICK_RATE
         self._last_tick = state.tick_count
-        return self._write(shared_info, state, ttb, slices, self.roles.update(state, ttb, dt), dt)
+        return self._write(shared_info, state, dt)
 
-    def _write(self, shared_info, state, ttb, slices, roles, dt):
+    def _write(self, shared_info, state, dt):
+        """dt None means a fresh episode."""
         obs_ttb, obs_slices = ttb_v1.ttb_from_state(state, self.obs_predictor)
-        shared_info.update(
-            ttb=ttb, roles=roles, ball_slices=slices, kickoff=is_kickoff(state),
-            role_locked={team: tr.locked for team, tr in self.roles.teams.items()},
-            coordination=self.coordination.update(state, ttb, roles, slices, dt),
-            obs_ttb=obs_ttb, obs_ball_slices=obs_slices,
-        )
+        if self.predictor is None:
+            reward_ttb, slices = obs_ttb, obs_slices
+        else:
+            reward_ttb, slices = ttb.ttb_from_state(state, self.predictor)
+        shared_info.update(obs_ttb=obs_ttb, obs_ball_slices=obs_slices, ttb=reward_ttb, ball_slices=slices,
+                           kickoff=is_kickoff(state))
+        if self.use_coordination:
+            roles = self.roles.reset(state, reward_ttb) if dt is None else self.roles.update(state, reward_ttb, dt)
+            shared_info.update(
+                roles=roles, role_locked={team: tr.locked for team, tr in self.roles.teams.items()},
+                coordination=self.coordination.update(state, reward_ttb, roles, slices, dt or 0.0),
+            )
         return shared_info
