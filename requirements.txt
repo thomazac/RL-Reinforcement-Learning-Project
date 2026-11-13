@@ -1,0 +1,11 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.11.0+cu128
+rlgym[rl-sim]==2.0.1
+rlgym-learn==2.0.0
+rlgym-learn-algos==0.4.2
+rocketsim==2.2.1
+numpy==1.26.4
+python-dotenv
+requests
+pytest
+setuptools<82
