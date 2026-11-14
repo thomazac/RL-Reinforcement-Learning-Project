@@ -160,10 +160,11 @@ def make_agent_controller(width=128, precision="float16", reward_ttb="v1", metri
 
 
 def make_config(n_proc=16, timesteps_per_iteration=100_000, buffer_size=300_000, batch_size=100_000, n_minibatches=2,
-                n_epochs=2, lr=2e-4, ent_coef=0.01, gamma=0.99, timestep_limit=5_000_000_000, device="cuda:0",
+                n_epochs=1, lr=2e-4, ent_coef=0.01, gamma=0.99, timestep_limit=5_000_000_000, device="cuda:0",
                 save_folder="checkpoints", run_name="run", save_every_ts=5_000_000, seed=123):
-    """Defaults are the design doc's learner settings, in RLGym-Learn's terms: 100,000 steps per iteration, a
-    300,000-step buffer, batches of 100,000 as two minibatches of 50,000, 2 epochs."""
+    """Defaults: 100,000 steps per iteration, a 300,000-step buffer, batches of 100,000 as two minibatches of
+    50,000, 1 epoch. Every epoch covers the whole buffer, so each step is trained on 3 times. (The design
+    doc's 2 epochs would make that 6.) Reuse is a training setting and can change mid-run."""
     return LearningCoordinatorConfigModel(
         base_config=BaseConfigModel(serde_types=serde_types(), timestep_limit=timestep_limit, random_seed=seed),
         process_config=ProcessConfigModel(n_proc=n_proc),
