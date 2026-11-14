@@ -7,8 +7,10 @@ Per agent, mirrored for orange so one policy plays both sides (x and y flipped):
   opponents  2x22, ordered by agent id
   ball       27  position, velocity, angular velocity (absolute); position and velocity relative to self;
                  position in self's frame (forward, right, up); predicted position at +0.5, +1, +2 s
-  global     46  34 boost pad timers; score difference; time remaining; overtime; kickoff; previous action (8)
-TTB and the ball prediction come from the frozen estimator (shared_info["obs_ttb"], ["obs_ball_slices"]).
+  global     52  34 boost pad timers; score difference; time remaining; overtime; kickoff; previous action (8);
+                 teammate profile (6, see profile_v1)
+TTB and the ball prediction come from the frozen estimator (shared_info["obs_ttb"], ["obs_ball_slices"]),
+the profile from the frozen profile_v1 (shared_info["profile"]).
 """
 
 from typing import Any, Dict, List
@@ -16,10 +18,10 @@ from typing import Any, Dict, List
 import numpy as np
 from rlgym.api import ActionParser, ObsBuilder
 
-from . import ttb_v1
+from . import profile_v1, ttb_v1
 
 OBS_LAYOUT = "entity-v1"
-CAR_DIM, BALL_DIM, GLOBAL_DIM = 22, 27, 46
+CAR_DIM, BALL_DIM, GLOBAL_DIM = 22, 27, 52
 OBS_DIM = 4 * CAR_DIM + BALL_DIM + GLOBAL_DIM
 
 POS_COEF, VEL_COEF, ANG_VEL_COEF = 1 / 2300, 1 / 2300, 1 / 5.5
@@ -83,6 +85,7 @@ class EntityObs(ObsBuilder):
         match = shared_info.get("match", {})
         prev = shared_info.get("prev_action", {})
         kickoff = float(shared_info.get("kickoff", False))
+        profile = shared_info["profile"]
 
         obs = {}
         for agent in agents:
@@ -111,6 +114,7 @@ class EntityObs(ObsBuilder):
                  float(match.get("time_remaining", MATCH_SECONDS)) / MATCH_SECONDS,
                  float(match.get("overtime", False)), kickoff],
                 prev.get(agent, np.zeros(8)),
+                profile[ids[others[0]]] if others and team[others[0]] == team[i] else profile_v1.WARMUP,
             ]
             obs[agent] = np.concatenate(parts).astype(np.float32)
         return obs

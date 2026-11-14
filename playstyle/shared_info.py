@@ -2,7 +2,7 @@
 
 from rlgym.api import SharedInfoProvider
 
-from . import ttb, ttb_v1
+from . import profile_v1, ttb, ttb_v1
 from .ball_prediction import BallPredictor
 from .coordination import CoordinationTracker
 from .roles import RoleTracker, is_kickoff
@@ -10,7 +10,7 @@ from .versions import OBS_VERSIONS, REWARD_TTB, reward_versions
 
 
 class TTBRoleProvider(SharedInfoProvider):
-    """Always writes shared_info["obs_ttb"] and ["obs_ball_slices"] (frozen v1, observation side),
+    """Always writes shared_info["obs_ttb"], ["obs_ball_slices"] and ["profile"] (frozen, observation side),
     ["ttb"] and ["ball_slices"] (reward side), ["kickoff"], ["obs_versions"] and ["reward_versions"].
     With coordination on, also ["roles"], ["role_locked"] and ["coordination"].
 
@@ -26,6 +26,7 @@ class TTBRoleProvider(SharedInfoProvider):
         self.predictor = BallPredictor() if reward_ttb == "live" else None
         self.roles = RoleTracker()
         self.coordination = CoordinationTracker()
+        self.profile = profile_v1.ProfileTracker()
         self._last_tick = 0
 
     def create(self, shared_info):
@@ -50,8 +51,10 @@ class TTBRoleProvider(SharedInfoProvider):
             reward_ttb, slices = obs_ttb, obs_slices
         else:
             reward_ttb, slices = ttb.ttb_from_state(state, self.predictor)
+        # Episode start only: mid-match kickoffs go through the engine, not here, so the profile carries over goals.
+        profile = self.profile.reset(state) if dt is None else self.profile.update(state, obs_ttb, dt)
         shared_info.update(obs_ttb=obs_ttb, obs_ball_slices=obs_slices, ttb=reward_ttb, ball_slices=slices,
-                           kickoff=is_kickoff(state))
+                           kickoff=is_kickoff(state), profile=profile)
         if self.use_coordination:
             roles = self.roles.reset(state, reward_ttb) if dt is None else self.roles.update(state, reward_ttb, dt)
             shared_info.update(

@@ -8,9 +8,10 @@ import hashlib
 import json
 from pathlib import Path
 
-from . import ttb_v1
+from . import profile_v1, ttb_v1
+from .obs import OBS_LAYOUT
 
-OBS_VERSIONS = {"ttb": ttb_v1.VERSION}
+OBS_VERSIONS = {"layout": OBS_LAYOUT, "ttb": ttb_v1.VERSION, "profile": profile_v1.VERSION}
 REWARD_TTB = {"v1": ttb_v1.VERSION, "live": "ttb-live"}
 FILENAME = "versions.json"
 _LIVE_SOURCES = ("ttb.py", "ball_prediction.py")

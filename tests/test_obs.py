@@ -36,6 +36,7 @@ def _mirror_state(env):
     info["obs_ttb"] = {swap[a]: t for a, t in env.shared_info["obs_ttb"].items()}
     info["obs_ball_slices"] = env.shared_info["obs_ball_slices"] * np.array([-1, -1, 1])
     info["prev_action"] = {swap[a]: p for a, p in env.shared_info["prev_action"].items()}
+    info["profile"] = {swap[a]: v for a, v in env.shared_info["profile"].items()}
     m = env.shared_info["match"]
     info["match"] = {**m, "blue": m["orange"], "orange": m["blue"], "score_diff": -m["score_diff"]}
     return s, info, swap
@@ -78,6 +79,13 @@ def test_ball_in_car_frame():
         assert local[0] > 0.9 * np.linalg.norm(d[:2])  # kickoff cars face the ball
 
 
+def test_teammate_profile_is_last():
+    env = _env_after()
+    env.shared_info["profile"]["blue-1"][:] = np.arange(6) / 10
+    o = env.obs_builder.build_obs(["blue-0"], env.state, env.shared_info)["blue-0"]
+    np.testing.assert_allclose(o[-6:], np.arange(6) / 10, atol=1e-7)
+
+
 def test_unreachable_ttb_is_capped_with_flag_off():
     env = _env_after()
     info = dict(env.shared_info)
@@ -92,4 +100,4 @@ def test_previous_action_recorded():
     assert env.shared_info["prev_action"] == {}
     obs, *_ = env.step({a: np.array([5]) for a in env.agents})
     expected = env.action_parser.parser.parser._lookup_table[5]
-    np.testing.assert_allclose(obs["blue-0"][-8:], expected)
+    np.testing.assert_allclose(obs["blue-0"][-14:-6], expected)  # profile (6) comes last
