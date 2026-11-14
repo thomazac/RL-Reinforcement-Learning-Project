@@ -63,66 +63,94 @@ class EntityObs(ObsBuilder):
     def get_obs_space(self, agent):
         return "real", OBS_DIM
 
+    def __init__(self):
+        self._key = None
+
     def reset(self, agents: List, initial_state, shared_info: Dict[str, Any]) -> None:
         pass
 
+    def _set_layout(self, ids, team):
+        """Everything that depends only on who is in the game: block order and mirror signs per observer."""
+        n = len(ids)
+        self._key, self._row = (ids, team), {a: i for i, a in enumerate(ids)}
+        mates = [[j for j in range(n) if j != i and team[j] == team[i]] for i in range(n)]
+        self._order = np.array([[i] + mates[i] + [j for j in range(n) if team[j] != team[i]] for i in range(n)])
+        self._mate = [ids[m[0]] if m else None for m in mates]
+        self._orange = np.array(team) == 1
+        self._sign = np.where(self._orange, -1.0, 1.0)
+        mirror = np.where(self._orange[:, None], MIRROR, 1.0)
+        # Mirror signs for the absolute vectors of a car block, its relative vectors, and the ball block.
+        self._mirror15, self._mirror6, self._mirror24 = (np.tile(mirror, k)[:, None, :] for k in (5, 2, 8))
+        self._mirror24 = self._mirror24[:, 0]
+
     def build_obs(self, agents: List, state, shared_info: Dict[str, Any]) -> Dict[Any, np.ndarray]:
+        """All observers at once: one [observer, feature] array, filled block by block."""
         ids = sorted(state.cars)
         cars = [state.cars[a] for a in ids]
-        team = np.array([c.team_num for c in cars])
-        ttb = np.array([shared_info["obs_ttb"][a] for a in ids])
-        reachable = np.isfinite(ttb)
-        ttb_scaled = np.minimum(np.where(reachable, ttb, TTB_CAP), TTB_CAP) / ttb_v1.HORIZON
+        team = [c.team_num for c in cars]
+        if self._key != (ids, team):
+            self._set_layout(ids, team)
+        n, order = len(ids), self._order
+        out = np.empty((n, n * CAR_DIM + BALL_DIM + GLOBAL_DIM))  # OBS_DIM in 2v2
+        blocks = out[:, :n * CAR_DIM].reshape(n, n, CAR_DIM)  # [observer, block, feature]
 
-        # Blue-frame arrays; orange agents get them mirrored.
-        pos = np.array([c.physics.position for c in cars], dtype=np.float64)
-        vel = np.array([c.physics.linear_velocity for c in cars], dtype=np.float64)
-        ang = np.array([c.physics.angular_velocity for c in cars], dtype=np.float64)
-        fwd = np.array([c.physics.forward for c in cars], dtype=np.float64)
-        up = np.array([c.physics.up for c in cars], dtype=np.float64)
-        rot = np.array([c.physics.rotation_mtx for c in cars], dtype=np.float64)  # columns: forward, right, up
-        flags = np.array([[c.boost_amount * BOOST_COEF, c.on_ground, c.has_flip, not c.has_jumped, c.is_demoed]
-                          for c in cars], dtype=np.float64)
-        ttb_cols = np.stack([ttb_scaled, reachable], axis=1)
+        # Blue-frame arrays, one row per car; orange observers get them mirrored (x and y flipped).
+        physics = [c.physics for c in cars]
+        pos = np.array([p.position for p in physics], dtype=np.float64)
+        vel = np.array([p.linear_velocity for p in physics], dtype=np.float64)
+        rot = np.array([p.rotation_mtx for p in physics], dtype=np.float64)  # columns: forward, right, up
         ball = state.ball
-        b_pos, b_vel, b_ang = (np.asarray(v, dtype=np.float64) for v in
-                               (ball.position, ball.linear_velocity, ball.angular_velocity))
-        predicted = np.asarray(shared_info["obs_ball_slices"], dtype=np.float64)[PREDICT_SLICES]
-        pads = np.asarray(state.boost_pad_timers, dtype=np.float64)
+        b_pos, b_vel = np.asarray(ball.position, dtype=np.float64), np.asarray(ball.linear_velocity, dtype=np.float64)
+        to_ball = b_pos - pos
+
+        absolute = np.empty((n, 15))
+        absolute[:, 0:3] = pos * POS_COEF
+        absolute[:, 3:6] = vel * VEL_COEF
+        absolute[:, 6:9] = np.array([p.angular_velocity for p in physics], dtype=np.float64) * ANG_VEL_COEF
+        absolute[:, 9:12] = rot[:, :, 0]
+        absolute[:, 12:15] = rot[:, :, 2]
+        blocks[:, :, 0:15] = absolute[order] * self._mirror15
+        blocks[:, :, 15:18] = (pos[order] - pos[:, None]) * REL_POS_COEF
+        blocks[:, :, 18:21] = (vel[order] - vel[:, None]) * REL_VEL_COEF
+        blocks[:, :, 15:21] *= self._mirror6
+
+        # The same for every observer: ball in the car's own frame (car and ball rotate alike under mirroring),
+        # the car's state flags and its TTB.
+        own = np.empty((n, 10))
+        own[:, 0:3] = np.matmul(to_ball[:, None, :], rot)[:, 0] * REL_POS_COEF
+        ttb = shared_info["obs_ttb"]
+        own[:, 3:] = [(c.boost_amount * BOOST_COEF, c.on_ground, c.has_flip, not c.has_jumped, c.is_demoed,
+                       (t if t < TTB_CAP else TTB_CAP) / ttb_v1.HORIZON, t < _INF)
+                      for c, t in zip(cars, (float(ttb[a]) for a in ids))]
+        blocks[:, :, 21:31] = own[order]
+
+        k = n * CAR_DIM
+        ball_block = out[:, k:k + BALL_DIM]
+        ball_block[:, 0:3] = b_pos * POS_COEF
+        ball_block[:, 3:6] = b_vel * BALL_VEL_COEF
+        ball_block[:, 6:9] = np.asarray(ball.angular_velocity, dtype=np.float64) * BALL_ANG_VEL_COEF
+        ball_block[:, 9:12] = to_ball * REL_POS_COEF
+        ball_block[:, 12:15] = (b_vel - vel) * BALL_VEL_COEF
+        ball_block[:, 15:24] = np.asarray(shared_info["obs_ball_slices"], dtype=np.float64)[PREDICT_SLICES].ravel() \
+            * POS_COEF
+        ball_block *= self._mirror24
+
+        k += BALL_DIM
+        pads = np.asarray(state.boost_pad_timers, dtype=np.float64) * PAD_TIMER_COEF
+        out[:, k:k + 34] = np.where(self._orange[:, None], pads[::-1], pads)
         match = shared_info.get("match", {})
+        out[:, k + 34] = np.clip(float(match.get("score_diff", 0)) * self._sign, -SCORE_CAP, SCORE_CAP) / SCORE_CAP
+        out[:, k + 35] = float(match.get("time_remaining", MATCH_SECONDS)) / MATCH_SECONDS
+        out[:, k + 36] = float(match.get("overtime", False))
+        out[:, k + 37] = float(shared_info.get("kickoff", False))
         prev = shared_info.get("prev_action", {})
-        kickoff = float(shared_info.get("kickoff", False))
+        out[:, k + 38:k + 46] = [prev[a] for a in ids] if len(prev) == n else [prev.get(a, _NO_ACTION) for a in ids]
         profile = shared_info["profile"]
+        out[:, k + 46:] = profile_v1.observed([profile_v1.WARMUP if m is None else profile[m] for m in self._mate])
 
-        obs = {}
-        for agent in agents:
-            i = ids.index(agent)
-            orange = team[i] == 1
-            m = MIRROR if orange else np.ones(3)
-            others = [j for j in range(len(ids)) if j != i and team[j] == team[i]] + \
-                     [j for j in range(len(ids)) if team[j] != team[i]]
+        out = out.astype(np.float32)
+        return {a: out[self._row[a]] for a in agents}
 
-            def car_block(j):
-                p, v = pos[j] * m, vel[j] * m
-                return np.concatenate([
-                    p * POS_COEF, v * VEL_COEF, ang[j] * m * ANG_VEL_COEF, fwd[j] * m, up[j] * m,
-                    (p - pos[i] * m) * REL_POS_COEF, (v - vel[i] * m) * REL_VEL_COEF,
-                    rot[j].T @ (b_pos - pos[j]) * REL_POS_COEF,  # unaffected by mirroring: car and ball rotate alike
-                    flags[j], ttb_cols[j]])
 
-            bp, bv = b_pos * m, b_vel * m
-            score = float(match.get("score_diff", 0)) * (-1 if orange else 1)
-            parts = [car_block(i)] + [car_block(j) for j in others] + [
-                bp * POS_COEF, bv * BALL_VEL_COEF, b_ang * m * BALL_ANG_VEL_COEF,
-                (bp - pos[i] * m) * REL_POS_COEF, (bv - vel[i] * m) * BALL_VEL_COEF,
-                (predicted * m).ravel() * POS_COEF,
-                (pads[::-1] if orange else pads) * PAD_TIMER_COEF,
-                [np.clip(score, -SCORE_CAP, SCORE_CAP) / SCORE_CAP,
-                 float(match.get("time_remaining", MATCH_SECONDS)) / MATCH_SECONDS,
-                 float(match.get("overtime", False)), kickoff],
-                prev.get(agent, np.zeros(8)),
-                profile_v1.observed(profile[ids[others[0]]] if others and team[others[0]] == team[i]
-                                    else profile_v1.WARMUP),
-            ]
-            obs[agent] = np.concatenate(parts).astype(np.float32)
-        return obs
+_INF = float("inf")
+_NO_ACTION = np.zeros(8)
