@@ -38,6 +38,7 @@ def run(policy, steps, seed, around_demo=False, max_steps=12000):
         rows.append(dict(
             state=copy.deepcopy(env.state), start=start,
             info=copy.deepcopy({k: env.shared_info[k] for k in INPUT_KEYS}),
+            profile_snapshot=env.shared_info_provider.profile.snapshot(),
             obs=env.obs_builder.build_obs(env.agents, env.state, env.shared_info),
         ))
         if demo_at is None and any(c.is_demoed for c in env.state.cars.values()):

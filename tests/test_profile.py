@@ -2,6 +2,7 @@ import copy
 from types import SimpleNamespace as NS
 
 import numpy as np
+import pytest
 
 from playstyle import profile_v1
 from playstyle.env import make_env
@@ -33,7 +34,8 @@ TTB = {"b0": 0.5, "b1": 1.5, "o0": 0.8, "o1": 2.0}
 def test_frozen_constants():
     np.testing.assert_array_equal(profile_v1.WARMUP, [0.725, 0.500, 0.425, 0.500, 0.173, 0.500])
     np.testing.assert_array_equal(profile_v1.EMA_SECONDS, [25, 25, 25, 25, 90, 25])
-    assert (profile_v1.DEMO_SCALE, profile_v1.DEMO_SOFT_CAP, profile_v1.VERSION) == (0.75, 2.0, "profile-v1")
+    assert (profile_v1.DEMO_SCALE, profile_v1.DEMO_SOFT_CAP, profile_v1.TEAM_TOUCH_RATE, profile_v1.VERSION) == \
+        (0.75, 2.0, 0.0123, "profile-v1")
 
 
 def test_demo_rate_soft_cap():
@@ -47,7 +49,7 @@ def test_demo_rate_soft_cap():
 
 
 def test_position_speed_and_challenge():
-    x = indicators(state(base()), TTB, [], DT)
+    x, _ = indicators(state(base()), TTB, [], DT)
     assert x["b0"][F["behind_ball"]] == 1 and x["b1"][F["last_man"]] == 1 and x["b0"][F["last_man"]] == 0
     assert x["o0"][F["behind_ball"]] == 1  # orange's own goal is at +y
     assert x["b0"][F["speed"]] == np.float64(1000 / 2300)
@@ -56,24 +58,41 @@ def test_position_speed_and_challenge():
 
 def test_challenge_skips_ties_and_both_unreachable():
     for b0, b1 in ((1.0, 1.0), (np.inf, np.inf)):
-        x = indicators(state(base()), {**TTB, "b0": b0, "b1": b1}, [], DT)
+        x, _ = indicators(state(base()), {**TTB, "b0": b0, "b1": b1}, [], DT)
         assert np.isnan(x["b0"][F["challenge"]]) and np.isnan(x["b1"][F["challenge"]])
 
 
 def test_demoed_car_is_not_first_and_not_last_man():
-    x = indicators(state(base(b0=car(0, -1000, demoed=True))), {**TTB, "b0": np.inf}, [], DT)
+    x, _ = indicators(state(base(b0=car(0, -1000, demoed=True))), {**TTB, "b0": np.inf}, [], DT)
     assert x["b0"][F["challenge"]] == 0 and x["b1"][F["challenge"]] == 1
     assert x["b0"][F["last_man"]] == 0 and x["b1"][F["last_man"]] == 1
     assert np.isnan(x["b0"][F["behind_ball"]]) and np.isnan(x["b0"][F["speed"]])
 
 
 def test_touch_share_and_demo_credit():
-    x = indicators(state(base(b1=car(0, -3000, touches=1))), TTB, [], DT)
-    assert x["b1"][F["touch_share"]] == 1 and x["b0"][F["touch_share"]] == 0
-    assert np.isnan(x["o0"][F["touch_share"]])
+    x, team_touch = indicators(state(base(b1=car(0, -3000, touches=1))), TTB, [], DT)
+    assert x["b1"][F["touch_share"]] == 1 and x["b0"][F["touch_share"]] == 0 and x["o0"][F["touch_share"]] == 0
+    assert team_touch == {"b0": 1, "b1": 1, "o0": 0, "o1": 0}
     cars = base(b0=car(0, -1000, victim="o0"), o0=car(1, 1000, demoed=True))
-    x = indicators(state(cars), TTB, ["o0"], DT)
+    x, _ = indicators(state(cars), TTB, ["o0"], DT)
     assert x["b0"][F["demo_rate"]] == 60 / DT / profile_v1.DEMO_SCALE and x["b1"][F["demo_rate"]] == 0
+
+
+def test_touch_share_follows_recent_touches():
+    """Four touches by b0 over 10 s, none by b1: the share must move well away from 0.5, then hold while
+    nobody touches (ratio of two averages that decay together)."""
+    tracker = profile_v1.ProfileTracker()
+    cars = base()
+    tracker.reset(state(cars))
+    for step in range(150):
+        cars["b0"].ball_touches = int(step % 37 == 0)
+        v = tracker.update(state(cars), TTB, DT)
+    share = v["b0"][F["touch_share"]]
+    assert share > 0.75 and v["b1"][F["touch_share"]] == pytest.approx(1 - share)
+    cars["b0"].ball_touches = 0
+    for _ in range(150):
+        v = tracker.update(state(cars), TTB, DT)
+    assert v["b0"][F["touch_share"]] == pytest.approx(share)
 
 
 def test_profile_carries_over_goal_and_resets_at_episode_start():

@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from playstyle.env import make_env
-from playstyle.obs import CAR_DIM, OBS_DIM, TTB_CAP, EntityObs
+from playstyle.obs import CAR_DIM, OBS_DIM, POS_COEF, REL_POS_COEF, TTB_CAP, EntityObs
 from playstyle import profile_v1, ttb_v1
 
 
@@ -49,9 +49,22 @@ def test_shape_and_finite():
         assert o.shape == (OBS_DIM,) and np.all(np.isfinite(o))
 
 
+def test_reversed_pad_order_is_the_rotated_field():
+    import RocketSim as rs
+    from playstyle.ball_prediction import _ensure_init
+    _ensure_init()
+    arena = rs.Arena(rs.GameMode.SOCCAR)  # must outlive the pads, which point into it
+    pads = arena.get_boost_pads()
+    pos = np.array([p.get_pos().as_numpy() for p in pads])
+    np.testing.assert_allclose(pos[::-1, :2], -pos[:, :2])
+    assert [p.is_big for p in pads][::-1] == [p.is_big for p in pads]
+
+
 def test_orange_sees_the_mirror_of_what_blue_sees():
     env = _env_after()
     assert env.shared_info["match"]["score_diff"] != 0  # seed 0 starts uneven, so the score flip is covered
+    env.state.boost_pad_timers = np.random.default_rng(0).uniform(0, 10, 34).astype(np.float32)
+    env.state._inverted_boost_pad_timers = None
     builder = EntityObs()
     real = builder.build_obs(env.agents, env.state, env.shared_info)
     s, info, swap = _mirror_state(env)
@@ -93,8 +106,8 @@ def test_relative_fields_are_relative_to_viewer():
     o = env.obs_builder.build_obs(["blue-0"], env.state, env.shared_info)["blue-0"]
     me, mate = env.state.cars["blue-0"].physics, env.state.cars["blue-1"].physics
     mate_block = o[CAR_DIM:2 * CAR_DIM]
-    np.testing.assert_allclose(mate_block[RELATIVE][:3], (mate.position - me.position) / 2300, atol=1e-5)
-    np.testing.assert_allclose(mate_block[:3], mate.position / 2300, atol=1e-6)
+    np.testing.assert_allclose(mate_block[RELATIVE][:3], (mate.position - me.position) * REL_POS_COEF, atol=1e-6)
+    np.testing.assert_allclose(mate_block[:3], mate.position * POS_COEF, atol=1e-6)
 
 
 def test_ball_in_each_cars_frame():
@@ -102,7 +115,7 @@ def test_ball_in_each_cars_frame():
     env.reset()
     obs = env.obs_builder.build_obs(env.agents, env.state, env.shared_info)
     for car_id, block in _car_blocks(obs, "blue-0", env.state).items():
-        local = block[BALL_LOCAL] * 2300
+        local = block[BALL_LOCAL] / REL_POS_COEF
         d = env.state.ball.position - env.state.cars[car_id].physics.position
         np.testing.assert_allclose(np.linalg.norm(local), np.linalg.norm(d), rtol=1e-4)
         assert local[0] > 0.9 * np.linalg.norm(d[:2]), car_id  # kickoff cars face the ball

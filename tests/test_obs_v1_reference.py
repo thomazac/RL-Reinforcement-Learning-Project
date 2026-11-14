@@ -49,7 +49,7 @@ def test_profile_matches(ref):
     for i, r in enumerate(ref["rows"]):
         s, info = r["state"], r["info"]
         if i == 0:
-            values = tracker.resume(s, info["profile"])
+            values = tracker.resume(s, r["profile_snapshot"])
         elif r["start"]:
             values = tracker.reset(s)
         else:

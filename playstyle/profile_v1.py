@@ -11,7 +11,9 @@ Per step, each car contributes an indicator per feature, or NaN to leave that av
   challenge     lower frozen TTB than its teammate; 0 if demoed and the teammate isn't;
                 NaN on exact ties or when both are unreachable (no hysteresis, flicker averages out)
   demo_rate     demos made this step, as demos per minute / DEMO_SCALE
-  touch_share   1 if it touched the ball and its teammate didn't, 0 the reverse, 0.5 both; NaN if neither
+  touch_share   share of the team's touches over the window: average of (1 if it touched and its teammate
+                didn't, 0.5 both, 0 otherwise) divided by average of (team touched), so rare touches still
+                count fully; starts as if one window of TEAM_TOUCH_RATE play split evenly
 WARMUP comes from scripted normal-vs-normal games (scripts/profile_warmup.py), except demo_rate: scripted bots
 never demo on purpose, so it uses the GC1 2s replay mean (0.13 demos/min; p90 0.34, max 0.77 over 120
 player-games). Pair-symmetric features (last_man, challenge, touch_share) average exactly 0.5 over any population.
@@ -30,6 +32,7 @@ WARMUP = np.array([0.725, 0.500, 0.425, 0.500, 0.173, 0.500])  # scripted 10 sim
 
 
 DEMO_SOFT_CAP = 2.0
+TEAM_TOUCH_RATE = 0.0123  # share of steps with a team touch in scripted play (0.18/s); scripts/profile_warmup.py
 
 
 def observed(values):
@@ -46,9 +49,10 @@ def _teammate(agent, state):
 
 
 def indicators(state, ttb, newly_demoed, dt):
-    """agent -> indicator per feature (NaN = no information this step)."""
+    """(agent -> indicator per feature, NaN = no information this step; agent -> whether its team touched).
+    The touch_share slot holds the car's share of this step's team touch (0 when the team didn't touch)."""
     ball_y = state.ball.position[1]
-    out = {}
+    out, team_touch = {}, {}
     for agent, car in state.cars.items():
         x = np.full(len(FEATURES), np.nan)
         mate_id = _teammate(agent, state)
@@ -67,24 +71,33 @@ def indicators(state, ttb, newly_demoed, dt):
                 t, tm = ttb[agent], ttb[mate_id]
                 if t != tm and (np.isfinite(t) or np.isfinite(tm)):
                     x[3] = float(t < tm)
-            touched, mate_touched = car.ball_touches > 0, mate.ball_touches > 0
-            if touched or mate_touched:
-                x[5] = 0.5 if touched and mate_touched else float(touched)
+        touched = car.ball_touches > 0
+        mate_touched = mate is not None and mate.ball_touches > 0
+        team_touch[agent] = float(touched or mate_touched)
+        x[5] = (0.5 if mate_touched else 1.0) if touched else 0.0
         demos = sum(1 for v in newly_demoed if car.bump_victim_id == v and state.cars[v].team_num != car.team_num)
         x[4] = demos * 60.0 / dt / DEMO_SCALE if dt > 0 else 0.0
         out[agent] = x
-    return out
+    return out, team_touch
 
 
 class ProfileTracker:
     def reset(self, state):
         self.values = {a: WARMUP.copy() for a in state.cars}
+        # touch_share = average(own share of team touches) / average(team touched), both over the same window
+        self._touch = {a: np.array([WARMUP[5] * TEAM_TOUCH_RATE, TEAM_TOUCH_RATE]) for a in state.cars}
         self._demoed = {a: c.is_demoed for a, c in state.cars.items()}
         return self.values
 
-    def resume(self, state, values):
-        """Continue from known averages (e.g. a recorded mid-episode state) instead of the warm-up."""
-        self.values = {a: np.array(v, dtype=np.float64) for a, v in values.items()}
+    def snapshot(self):
+        """Full tracker state, enough to resume exactly."""
+        return {"values": {a: v.copy() for a, v in self.values.items()},
+                "touch": {a: t.copy() for a, t in self._touch.items()}}
+
+    def resume(self, state, snapshot):
+        """Continue from a snapshot (e.g. a recorded mid-episode state) instead of the warm-up."""
+        self.values = {a: np.array(v, dtype=np.float64) for a, v in snapshot["values"].items()}
+        self._touch = {a: np.array(t, dtype=np.float64) for a, t in snapshot["touch"].items()}
         self._demoed = {a: c.is_demoed for a, c in state.cars.items()}
         return self.values
 
@@ -92,8 +105,13 @@ class ProfileTracker:
         newly = [a for a, c in state.cars.items() if c.is_demoed and not self._demoed.get(a, False)]
         self._demoed = {a: c.is_demoed for a, c in state.cars.items()}
         alpha = 1.0 - np.exp(-dt / EMA_SECONDS)
-        for agent, x in indicators(state, ttb, newly, dt).items():
+        x_all, team_touch = indicators(state, ttb, newly, dt)
+        for agent, x in x_all.items():
             v = self.values.setdefault(agent, WARMUP.copy())
             seen = ~np.isnan(x)
+            seen[5] = False
             v[seen] += alpha[seen] * (x[seen] - v[seen])
+            t = self._touch.setdefault(agent, np.array([WARMUP[5] * TEAM_TOUCH_RATE, TEAM_TOUCH_RATE]))
+            t += alpha[5] * (np.array([x[5], team_touch[agent]]) - t)
+            v[5] = t[0] / t[1]
         return self.values

@@ -26,7 +26,12 @@ OBS_LAYOUT = "entity-v1"
 CAR_DIM, BALL_DIM, GLOBAL_DIM = 31, 24, 52
 OBS_DIM = 4 * CAR_DIM + BALL_DIM + GLOBAL_DIM
 
-POS_COEF, VEL_COEF, ANG_VEL_COEF = 1 / 2300, 1 / 2300, 1 / 5.5
+# Scales keep every feature within about +-1.5 (checked by scripts/obs_ranges.py on the reference).
+POS_COEF = 1 / 5120  # half the field length: absolute positions within +-1.2 even inside a goal
+REL_POS_COEF = 1 / 8000  # relative positions and ball in car frame: corner to corner ~ +-1.4
+VEL_COEF, REL_VEL_COEF = 1 / 2300, 1 / 4600  # car max speed; two cars at max speed head-on
+BALL_VEL_COEF = 1 / 6000  # ball max speed; also the ball's velocity relative to a car
+ANG_VEL_COEF, BALL_ANG_VEL_COEF = 1 / 5.5, 1 / 6.0  # car and ball angular velocity caps
 PAD_TIMER_COEF, BOOST_COEF = 1 / 10, 1 / 100
 TTB_CAP = ttb_v1.HORIZON + 0.5  # unreachable cars read as just past the horizon, with the reachable flag off
 PREDICT_SLICES = [int(round(t / ttb_v1.SLICE_DT)) for t in (0.5, 1.0, 2.0)]
@@ -101,15 +106,15 @@ class EntityObs(ObsBuilder):
                 p, v = pos[j] * m, vel[j] * m
                 return np.concatenate([
                     p * POS_COEF, v * VEL_COEF, ang[j] * m * ANG_VEL_COEF, fwd[j] * m, up[j] * m,
-                    (p - pos[i] * m) * POS_COEF, (v - vel[i] * m) * VEL_COEF,
-                    rot[j].T @ (b_pos - pos[j]) * POS_COEF,  # unaffected by mirroring: car and ball rotate alike
+                    (p - pos[i] * m) * REL_POS_COEF, (v - vel[i] * m) * REL_VEL_COEF,
+                    rot[j].T @ (b_pos - pos[j]) * REL_POS_COEF,  # unaffected by mirroring: car and ball rotate alike
                     flags[j], ttb_cols[j]])
 
             bp, bv = b_pos * m, b_vel * m
             score = float(match.get("score_diff", 0)) * (-1 if orange else 1)
             parts = [car_block(i)] + [car_block(j) for j in others] + [
-                bp * POS_COEF, bv * VEL_COEF, b_ang * m * ANG_VEL_COEF,
-                (bp - pos[i] * m) * POS_COEF, (bv - vel[i] * m) * VEL_COEF,
+                bp * POS_COEF, bv * BALL_VEL_COEF, b_ang * m * BALL_ANG_VEL_COEF,
+                (bp - pos[i] * m) * REL_POS_COEF, (bv - vel[i] * m) * BALL_VEL_COEF,
                 (predicted * m).ravel() * POS_COEF,
                 (pads[::-1] if orange else pads) * PAD_TIMER_COEF,
                 [np.clip(score, -SCORE_CAP, SCORE_CAP) / SCORE_CAP,

@@ -24,19 +24,24 @@ def main():
     env.reset()
     dt = TICK_SKIP / 120
     demoed = {a: False for a in env.agents}
-    rows = []
+    rows, team_touch = [], []
     for _ in range(int(args.minutes * 60 / dt)):
         _, _, term, trunc = env.step(bot.act(env.state, env.shared_info))
         s = env.state
         newly = [a for a, c in s.cars.items() if c.is_demoed and not demoed[a]]
         demoed = {a: c.is_demoed for a, c in s.cars.items()}
-        rows += list(profile_v1.indicators(s, env.shared_info["obs_ttb"], newly, dt).values())
+        x, touch = profile_v1.indicators(s, env.shared_info["obs_ttb"], newly, dt)
+        rows += list(x.values())
+        team_touch += list(touch.values())
         if any(term.values()) or any(trunc.values()):
             env.reset()
     mean = np.nanmean(np.array(rows), axis=0)
+    rate = float(np.mean(team_touch))
+    mean[profile_v1.FEATURES.index("touch_share")] = mean[profile_v1.FEATURES.index("touch_share")] / rate
     for name, v in zip(profile_v1.FEATURES, mean):
         print(f"  {name:12s} {v:.3f}")
     print("WARMUP = np.array([" + ", ".join(f"{v:.3f}" for v in mean) + "])")
+    print(f"TEAM_TOUCH_RATE = {rate:.4f}  # {rate / dt:.2f} team touches per second")
 
 
 if __name__ == "__main__":
