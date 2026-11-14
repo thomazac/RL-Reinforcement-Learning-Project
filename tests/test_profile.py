@@ -31,8 +31,9 @@ TTB = {"b0": 0.5, "b1": 1.5, "o0": 0.8, "o1": 2.0}
 
 
 def test_frozen_constants():
-    np.testing.assert_array_equal(profile_v1.WARMUP, [0.725, 0.500, 0.425, 0.500, 0.013, 0.500])
-    assert (profile_v1.EMA_SECONDS, profile_v1.DEMO_SCALE, profile_v1.VERSION) == (25.0, 2.0, "profile-v1")
+    np.testing.assert_array_equal(profile_v1.WARMUP, [0.725, 0.500, 0.425, 0.500, 0.173, 0.500])
+    np.testing.assert_array_equal(profile_v1.EMA_SECONDS, [25, 25, 25, 25, 90, 25])
+    assert (profile_v1.DEMO_SCALE, profile_v1.VERSION) == (0.75, "profile-v1")
 
 
 def test_position_speed_and_challenge():

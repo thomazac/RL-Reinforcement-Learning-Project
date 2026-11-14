@@ -1,6 +1,6 @@
 """FROZEN teammate profile, version 1. Observation inputs only; never edit, add profile_v2.py instead.
 
-Each car gets running averages (~25 s) of how it plays; every agent's observation carries its teammate's.
+Each car gets running averages (~25 s; 90 s for demo rate) of how it plays; every agent's observation carries its teammate's.
 Averages start from WARMUP at the start of an episode only. They carry over goals and kickoffs, because
 reading the teammate across the whole match is the point.
 
@@ -12,18 +12,20 @@ Per step, each car contributes an indicator per feature, or NaN to leave that av
                 NaN on exact ties or when both are unreachable (no hysteresis, flicker averages out)
   demo_rate     demos made this step, as demos per minute / DEMO_SCALE
   touch_share   1 if it touched the ball and its teammate didn't, 0 the reverse, 0.5 both; NaN if neither
-WARMUP comes from scripted normal-vs-normal games (scripts/profile_warmup.py). Pair-symmetric features
-(last_man, challenge, touch_share) average exactly 0.5 over any population.
+WARMUP comes from scripted normal-vs-normal games (scripts/profile_warmup.py), except demo_rate: scripted bots
+never demo on purpose, so it uses the GC1 2s replay mean (0.13 demos/min; p90 0.34, max 0.77 over 120
+player-games). Pair-symmetric features (last_man, challenge, touch_share) average exactly 0.5 over any population.
+Demos are rare, so demo_rate averages over a longer window; one demo adds 60 / (90 * 0.75) ~ 0.9 and decays.
 """
 
 import numpy as np
 
 VERSION = "profile-v1"
 FEATURES = ("behind_ball", "last_man", "speed", "challenge", "demo_rate", "touch_share")
-EMA_SECONDS = 25.0
+EMA_SECONDS = np.array([25.0, 25.0, 25.0, 25.0, 90.0, 25.0])
 MAX_SPEED = 2300.0
-DEMO_SCALE = 2.0  # demos per minute that reads as 1.0
-WARMUP = np.array([0.725, 0.500, 0.425, 0.500, 0.013, 0.500])  # 10 sim-minutes, seed 0
+DEMO_SCALE = 0.75  # demos per minute that reads as 1.0: a 2x-baseline Demo Specialist reads ~0.5-1
+WARMUP = np.array([0.725, 0.500, 0.425, 0.500, 0.173, 0.500])  # scripted 10 sim-minutes, seed 0; demo from replays
 
 
 def _teammate(agent, state):
@@ -68,6 +70,12 @@ class ProfileTracker:
         self._demoed = {a: c.is_demoed for a, c in state.cars.items()}
         return self.values
 
+    def resume(self, state, values):
+        """Continue from known averages (e.g. a recorded mid-episode state) instead of the warm-up."""
+        self.values = {a: np.array(v, dtype=np.float64) for a, v in values.items()}
+        self._demoed = {a: c.is_demoed for a, c in state.cars.items()}
+        return self.values
+
     def update(self, state, ttb, dt):
         newly = [a for a, c in state.cars.items() if c.is_demoed and not self._demoed.get(a, False)]
         self._demoed = {a: c.is_demoed for a, c in state.cars.items()}
@@ -75,5 +83,5 @@ class ProfileTracker:
         for agent, x in indicators(state, ttb, newly, dt).items():
             v = self.values.setdefault(agent, WARMUP.copy())
             seen = ~np.isnan(x)
-            v[seen] += alpha * (x[seen] - v[seen])
+            v[seen] += alpha[seen] * (x[seen] - v[seen])
         return self.values
