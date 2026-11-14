@@ -1,3 +1,5 @@
+import random
+
 from rlgym.api import RLGym
 from rlgym.rocket_league.action_parsers import LookupTableAction, RepeatAction
 from rlgym.rocket_league.done_conditions import AnyCondition, NoTouchTimeoutCondition, TimeoutCondition
@@ -29,3 +31,11 @@ def make_env(team_size=2, obs_builder=None, reward_fn=None, reward_ttb="v1", coo
         transition_engine=MatchEngine(RocketSimEngine(), kickoff),
         shared_info_provider=TTBRoleProvider(reward_ttb=reward_ttb, coordination=coordination),
     )
+
+
+def build_env(reward_ttb="v1", coordination=False):
+    """The env one RLGym-Learn process runs (Phase 1a setup by default). RLGym-Learn seeds Python's global
+    random with a different number in each process before calling this, so drawing the env seed from it gives
+    every process its own kickoffs and starting scores, repeatable from the run's seed. This module stays free
+    of torch so env processes start fast and stay small."""
+    return make_env(reward_ttb=reward_ttb, coordination=coordination, seed=random.getrandbits(32))
