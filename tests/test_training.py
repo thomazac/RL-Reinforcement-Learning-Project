@@ -4,8 +4,10 @@ import random
 import numpy as np
 import pytest
 import torch
-from rlgym_learn_algos.ppo import PPOLearnerConfigModel
+from rlgym_learn_algos.ppo import GAETrajectoryProcessor, GAETrajectoryProcessorConfigModel, PPOLearnerConfigModel
 from rlgym_learn_algos.ppo.ppo_learner import DerivedPPOLearnerConfig, PPOLearner
+from rlgym_learn_algos.ppo.trajectory import Trajectory
+from rlgym_learn_algos.ppo.trajectory_processor import DerivedTrajectoryProcessorConfig
 from torch.nn.utils import parameters_to_vector
 
 from playstyle import versions
@@ -76,6 +78,77 @@ def test_float16_update_stays_close_to_float32():
     # near zero. A broken float16 path (no gradient unscaling, skipped steps) gives 1 or more.
     assert (weights(half) - weights(full)).norm() < 0.5 * moved
     assert weights(half).dtype == torch.float32  # weights themselves stay in float32
+
+
+class RecordingLoss(torch.nn.MSELoss):
+    def __init__(self):
+        super().__init__()
+        self.targets = []
+
+    def forward(self, predicted, target):
+        self.targets.append(target.detach().float().cpu().view(-1).clone())
+        return super().forward(predicted, target)
+
+
+DEVICES = ["cpu"] + (["cuda"] * torch.cuda.is_available())
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("learner_class", ["ours_float32", "ours_float16", "rlgym_learn"])
+def test_critic_targets_are_values_plus_advantages(learner_class, device):
+    """rlgym-learn-algos issue #30: non-blocking copies let the targets be built before the copies finished,
+    leaving the critic with targets equal to its own predictions (critic loss 0, critic never moves)."""
+    if learner_class == "ours_float16" and device == "cpu":
+        pytest.skip("float16 runs only on the GPU")
+    learner = {"ours_float32": lambda: Learner(*factories(128), precision="float32"),
+               "ours_float16": lambda: Learner(*factories(128), precision="float16"),
+               "rlgym_learn": lambda: PPOLearner(*factories(128))}[learner_class]()
+    loaded(learner, device=device)
+    learner.critic_loss_fn = RecordingLoss()
+    batches = FixedBatches()
+    data = learner.learn(batches)
+
+    expected = []
+    for _ in range(2):  # epochs
+        for _, _, _, _, values, advantages in batches.get_all_batches_shuffled(BATCH):
+            expected += list((values + advantages).split(BATCH // 2))
+    assert len(learner.critic_loss_fn.targets) == len(expected) == 12
+    for got, want in zip(learner.critic_loss_fn.targets, expected):
+        assert torch.allclose(got, want, atol=1e-6)
+    assert data.critic_loss > 0.1
+    assert data.critic_update_magnitude > 0
+
+
+def hand_gae(rewards, values, final_value, truncated, gamma=0.99, lmbda=0.95):
+    following = np.append(values[1:], final_value if truncated else 0.0)
+    deltas = rewards + gamma * following - values
+    advantages, running = np.zeros_like(values), 0.0
+    for i in reversed(range(len(values))):
+        running = deltas[i] + gamma * lmbda * running
+        advantages[i] = running
+    return advantages
+
+
+def test_truncated_trajectories_bootstrap_from_their_final_observation():
+    """GAE as RLGym-Learn computes it: a truncated trajectory continues from the value of its final observation
+    (the one before the reset); a terminated one stops there."""
+    processor = GAETrajectoryProcessor()
+    processor.load(DerivedTrajectoryProcessorConfig(
+        GAETrajectoryProcessorConfigModel(standardize_rewards=False, reward_clip=None), "test",
+        torch.float32, torch.device("cpu"), 0))
+    rng = np.random.default_rng(0)
+    trajectories, expected = [], []
+    for i, truncated in enumerate((True, False, True, False)):
+        n = 20 + 7 * i
+        rewards = rng.normal(0, 1, n)
+        values = rng.normal(0, 1, n)
+        final_value = 5.0  # large, so bootstrapping or not is plain in the result
+        trajectories.append(Trajectory("blue-0", [np.zeros(OBS_DIM, np.float32)] * n, [np.zeros(1, np.int64)] * n,
+                                       torch.zeros(n), list(rewards), torch.tensor(values, dtype=torch.float32),
+                                       np.zeros(OBS_DIM, np.float32), torch.tensor(final_value), truncated))
+        expected.append(hand_gae(rewards, values, final_value, truncated))
+    (_, _, _, _, _, advantages), _ = processor.process_trajectories(trajectories)
+    assert np.allclose(advantages.numpy(), np.concatenate(expected), atol=1e-4)
 
 
 def test_checkpoint_records_versions_and_only_loads_matching_observations(tmp_path):
