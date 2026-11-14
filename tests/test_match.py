@@ -108,3 +108,27 @@ def test_goal_in_env_resets_to_kickoff_without_ending_episode():
     env.step(noop)
     ball = env.state.ball.position
     assert abs(ball[0]) < 1 and abs(ball[1]) < 1 and not env.state.goal_scored
+
+
+def test_seed_fixes_kickoff_spawns_without_touching_global_random():
+    import random
+    layouts = []
+    for global_seed in (1, 2):  # the global stream must not matter
+        random.seed(global_seed)
+        before = random.getstate()
+        env = make_env(coordination=False, seed=5)
+        spawns = []
+        for _ in range(6):
+            env.reset()
+            spawns.append(np.array([c.physics.position for c in env.state.cars.values()]))
+        s = copy.deepcopy(env.state)  # a goal, then the mid-match kickoff draws from the same stream
+        s.ball.position = np.array([0, 5300, 200], dtype=np.float32)
+        env.transition_engine.set_state(s, env.shared_info)
+        noop = {a: np.array([8]) for a in env.agents}
+        env.step(noop), env.step(noop)
+        assert env.shared_info["kickoff"]
+        spawns.append(np.array([c.physics.position for c in env.state.cars.values()]))
+        layouts.append(np.array(spawns))
+        assert random.getstate() == before
+    np.testing.assert_array_equal(layouts[0], layouts[1])
+    assert len({tuple(l.ravel().round()) for l in layouts[0]}) > 1  # and the spawns do vary between kickoffs

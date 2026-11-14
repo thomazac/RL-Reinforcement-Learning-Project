@@ -9,6 +9,7 @@ when the ball next touches the ground, or goes to overtime if tied; in overtime 
 """
 
 import copy
+import random
 
 import numpy as np
 from rlgym.api import DoneCondition, StateMutator, TransitionEngine
@@ -28,6 +29,23 @@ def new_match(blue=0, orange=0, time_remaining=MATCH_SECONDS):
             "overtime": False, "over": False, "winner": None, "goal": None}
 
 
+class SeededKickoff(KickoffMutator):
+    """KickoffMutator picks spawn points with Python's global random module. This runs it on its own seeded
+    stream instead, and leaves the global stream as it found it."""
+
+    def __init__(self, seed=None):
+        self._random = random.Random(seed)
+
+    def apply(self, state, shared_info):
+        outer = random.getstate()
+        random.setstate(self._random.getstate())
+        try:
+            super().apply(state, shared_info)
+        finally:
+            self._random.setstate(random.getstate())
+            random.setstate(outer)
+
+
 class RandomMatchStart(StateMutator):
     """Samples the starting score difference and clock into shared_info["match"]."""
 
@@ -44,9 +62,9 @@ class RandomMatchStart(StateMutator):
 class MatchEngine(TransitionEngine):
     """Wraps a transition engine: keeps score and clock, and resets to kickoff on the step after a goal."""
 
-    def __init__(self, engine):
+    def __init__(self, engine, kickoff=None):
         self.engine = engine
-        self.kickoff = KickoffMutator()
+        self.kickoff = kickoff or KickoffMutator()
         self._kickoff_pending = False
 
     @property
