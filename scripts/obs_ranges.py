@@ -1,5 +1,6 @@
 """Per-feature min, max and spread of the observation over the recorded reference, flagging scaling problems."""
 
+import argparse
 import lzma
 import pickle
 
@@ -25,16 +26,30 @@ def feature_names():
     return names
 
 
+LIMIT = 1.5
+
+
 def main():
+    """Recorded play and the hand-built block are reported side by side; spread is judged on both together."""
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--flagged", action="store_true", help="print only flagged features")
+    args = ap.parse_args()
     with lzma.open("tests/fixtures/obs_v1_reference.pkl.xz", "rb") as f:
-        rows = pickle.load(f)["rows"]
-    x = np.array([o for r in rows for o in r["obs"].values()])
-    lo, hi, sd = x.min(0), x.max(0), x.std(0)
-    print(f"{len(x)} observations x {x.shape[1]} features")
-    print(f"{'feature':24s} {'min':>8s} {'max':>8s} {'std':>7s}  flag")
-    for name, a, b, s in zip(feature_names(), lo, hi, sd):
-        flag = "OUT OF RANGE" if max(abs(a), abs(b)) > 1.5 else ("NO SPREAD" if s < 0.01 else "")
-        print(f"{name:24s} {a:8.3f} {b:8.3f} {s:7.3f}  {flag}")
+        ref = pickle.load(f)
+    play = np.array([o for r in ref["rows"] for o in r["obs"].values()])
+    hand = np.array([o for r in ref["hand_rows"] for o in r["obs"].values()])
+    both = np.concatenate([play, hand])
+    print(f"{len(play)} recorded + {len(hand)} hand-built observations x {both.shape[1]} features")
+    print(f"{'feature':24s} {'play min':>9s} {'play max':>9s} {'hand min':>9s} {'hand max':>9s} {'std':>7s}  flag")
+    worst = 0.0
+    for i, name in enumerate(feature_names()):
+        peak = np.abs(both[:, i]).max()
+        worst = max(worst, peak)
+        flag = "OUT OF RANGE" if peak > LIMIT else ("NO SPREAD" if both[:, i].std() < 0.01 else "")
+        if flag or not args.flagged:
+            print(f"{name:24s} {play[:, i].min():9.3f} {play[:, i].max():9.3f} {hand[:, i].min():9.3f} "
+                  f"{hand[:, i].max():9.3f} {both[:, i].std():7.3f}  {flag}")
+    print(f"largest magnitude anywhere: {worst:.3f}")
 
 
 if __name__ == "__main__":

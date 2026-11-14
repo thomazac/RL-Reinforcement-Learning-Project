@@ -13,7 +13,9 @@ Per step, each car contributes an indicator per feature, or NaN to leave that av
   demo_rate     demos made this step, as demos per minute / DEMO_SCALE
   touch_share   share of the team's touches over the window: average of (1 if it touched and its teammate
                 didn't, 0.5 both, 0 otherwise) divided by average of (team touched), so rare touches still
-                count fully; starts as if one window of TEAM_TOUCH_RATE play split evenly
+                count fully. Both averages carry a small constant, TOUCH_PRIOR_SECONDS of evenly split touches
+                at TEAM_TOUCH_RATE, so the share drifts back to 0.5 when a team stops touching and one touch
+                after a long gap reads ~0.79, not 1. Starts as if one window of TEAM_TOUCH_RATE play split evenly
 WARMUP comes from scripted normal-vs-normal games (scripts/profile_warmup.py), except demo_rate: scripted bots
 never demo on purpose, so it uses the GC1 2s replay mean (0.13 demos/min; p90 0.34, max 0.77 over 120
 player-games). Pair-symmetric features (last_man, challenge, touch_share) average exactly 0.5 over any population.
@@ -33,6 +35,8 @@ WARMUP = np.array([0.725, 0.500, 0.425, 0.500, 0.173, 0.500])  # scripted 10 sim
 
 DEMO_SOFT_CAP = 2.0
 TEAM_TOUCH_RATE = 0.0123  # share of steps with a team touch in scripted play (0.18/s); scripts/profile_warmup.py
+TOUCH_PRIOR_SECONDS = 4.0
+TOUCH_PRIOR = TEAM_TOUCH_RATE * TOUCH_PRIOR_SECONDS / EMA_SECONDS[5]  # added to the team average, half to the car's
 
 
 def observed(values):
@@ -92,13 +96,13 @@ class ProfileTracker:
     def snapshot(self):
         """Full tracker state, enough to resume exactly."""
         return {"values": {a: v.copy() for a, v in self.values.items()},
-                "touch": {a: t.copy() for a, t in self._touch.items()}}
+                "touch": {a: t.copy() for a, t in self._touch.items()}, "demoed": dict(self._demoed)}
 
-    def resume(self, state, snapshot):
+    def resume(self, snapshot):
         """Continue from a snapshot (e.g. a recorded mid-episode state) instead of the warm-up."""
         self.values = {a: np.array(v, dtype=np.float64) for a, v in snapshot["values"].items()}
         self._touch = {a: np.array(t, dtype=np.float64) for a, t in snapshot["touch"].items()}
-        self._demoed = {a: c.is_demoed for a, c in state.cars.items()}
+        self._demoed = dict(snapshot["demoed"])
         return self.values
 
     def update(self, state, ttb, dt):
@@ -113,5 +117,5 @@ class ProfileTracker:
             v[seen] += alpha[seen] * (x[seen] - v[seen])
             t = self._touch.setdefault(agent, np.array([WARMUP[5] * TEAM_TOUCH_RATE, TEAM_TOUCH_RATE]))
             t += alpha[5] * (np.array([x[5], team_touch[agent]]) - t)
-            v[5] = t[0] / t[1]
+            v[5] = (t[0] + 0.5 * TOUCH_PRIOR) / (t[1] + TOUCH_PRIOR)
         return self.values

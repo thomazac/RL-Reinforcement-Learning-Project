@@ -3,7 +3,8 @@ tests/test_obs_v1_reference.py. Run once, before any rewrite of those modules; t
 
 800 consecutive steps (~53 s, more than a 25 s averaging window): 400 scripted (demo variant vs normal, for
 demo events) and 400 random actions (jumps, aerials). Episode starts are flagged so the profile replay
-resets where the original did.
+resets where the original did. A separate block of hand-built states (scripts/obs_hand_states.py) covers
+what play doesn't reach: aerials, the ceiling, goals, corners, top speeds, overtime, multiple demos.
 """
 
 import argparse
@@ -20,6 +21,7 @@ from playstyle.env import make_env
 from playstyle.obs import OBS_LAYOUT
 from playstyle.scripted import RoleBot
 from playstyle.versions import OBS_VERSIONS
+from scripts.obs_hand_states import hand_rows
 
 OUT = Path("tests/fixtures/obs_v1_reference.pkl.xz")
 INPUT_KEYS = ("obs_ttb", "obs_ball_slices", "profile", "prev_action", "match", "kickoff")
@@ -64,10 +66,12 @@ def main():
     args = ap.parse_args()
     if OUT.exists() and not args.force:
         raise SystemExit(f"{OUT} exists; the observation v1 reference is permanent")
-    rows = record()
+    rows, hand = record(), hand_rows()
     OUT.parent.mkdir(parents=True, exist_ok=True)
     with lzma.open(OUT, "wb") as f:
-        pickle.dump({"versions": OBS_VERSIONS, "layout": OBS_LAYOUT, "rows": rows}, f)
+        pickle.dump({"versions": OBS_VERSIONS, "layout": OBS_LAYOUT, "rows": rows, "hand_rows": hand}, f)
+    print(f"{len(hand)} hand-built states: " + ", ".join(
+        f"{n} {sum(r['name'] == n for r in hand)}" for n in dict.fromkeys(r["name"] for r in hand)))
     demos = sum(c.is_demoed for r in rows for c in r["state"].cars.values())
     touches = sum(c.ball_touches > 0 for r in rows for c in r["state"].cars.values())
     goals = sum(bool(r["info"]["match"]["goal"]) for r in rows)

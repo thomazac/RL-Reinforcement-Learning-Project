@@ -34,8 +34,8 @@ TTB = {"b0": 0.5, "b1": 1.5, "o0": 0.8, "o1": 2.0}
 def test_frozen_constants():
     np.testing.assert_array_equal(profile_v1.WARMUP, [0.725, 0.500, 0.425, 0.500, 0.173, 0.500])
     np.testing.assert_array_equal(profile_v1.EMA_SECONDS, [25, 25, 25, 25, 90, 25])
-    assert (profile_v1.DEMO_SCALE, profile_v1.DEMO_SOFT_CAP, profile_v1.TEAM_TOUCH_RATE, profile_v1.VERSION) == \
-        (0.75, 2.0, 0.0123, "profile-v1")
+    assert (profile_v1.DEMO_SCALE, profile_v1.DEMO_SOFT_CAP, profile_v1.TEAM_TOUCH_RATE,
+            profile_v1.TOUCH_PRIOR_SECONDS, profile_v1.VERSION) == (0.75, 2.0, 0.0123, 4.0, "profile-v1")
 
 
 def test_demo_rate_soft_cap():
@@ -79,8 +79,8 @@ def test_touch_share_and_demo_credit():
 
 
 def test_touch_share_follows_recent_touches():
-    """Four touches by b0 over 10 s, none by b1: the share must move well away from 0.5, then hold while
-    nobody touches (ratio of two averages that decay together)."""
+    """Four touches by b0 over 10 s, none by b1: the share must move well away from 0.5, then drift back
+    slowly while nobody touches."""
     tracker = profile_v1.ProfileTracker()
     cars = base()
     tracker.reset(state(cars))
@@ -88,11 +88,39 @@ def test_touch_share_follows_recent_touches():
         cars["b0"].ball_touches = int(step % 37 == 0)
         v = tracker.update(state(cars), TTB, DT)
     share = v["b0"][F["touch_share"]]
-    assert share > 0.75 and v["b1"][F["touch_share"]] == pytest.approx(1 - share)
+    assert share > 0.7 and v["b1"][F["touch_share"]] == pytest.approx(1 - share)
     cars["b0"].ball_touches = 0
     for _ in range(150):
         v = tracker.update(state(cars), TTB, DT)
-    assert v["b0"][F["touch_share"]] == pytest.approx(share)
+    assert 0.65 < v["b0"][F["touch_share"]] < share
+
+
+def test_touch_share_after_a_long_gap():
+    """With no touches for minutes the share returns to 0.5, and the next single touch moves it only part way."""
+    tracker = profile_v1.ProfileTracker()
+    cars = base(b0=car(0, -1000, touches=1))
+    tracker.reset(state(cars))
+    tracker.update(state(cars), TTB, DT)
+    cars["b0"].ball_touches = 0
+    for _ in range(3000):  # 200 s
+        v = tracker.update(state(cars), TTB, DT)
+    assert v["b0"][F["touch_share"]] == pytest.approx(0.5, abs=0.01)
+    cars["b1"].ball_touches = 1
+    v = tracker.update(state(cars), TTB, DT)
+    assert 0.18 < v["b0"][F["touch_share"]] < 0.25 and v["b1"][F["touch_share"]] == pytest.approx(1 - v["b0"][5])
+
+
+def test_touch_share_with_empty_averages_is_half():
+    tracker = profile_v1.ProfileTracker()
+    cars = base()
+    tracker.reset(state(cars))
+    snap = tracker.snapshot()
+    for t in snap["touch"].values():
+        t[:] = 0.0
+    tracker.resume(snap)
+    with np.errstate(all="raise"):
+        v = tracker.update(state(cars), TTB, DT)
+    assert all(x[F["touch_share"]] == 0.5 for x in v.values())
 
 
 def test_profile_carries_over_goal_and_resets_at_episode_start():
