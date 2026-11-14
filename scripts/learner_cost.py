@@ -23,12 +23,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from rlgym_learn.api import DerivedAgentControllerConfig
-from rlgym_learn_algos.ppo.trajectory import Trajectory
+from rlgym_learn_algos.ppo import Trajectory
 
 from playstyle.env import make_env
 from playstyle.network import N_ACTIONS
 from playstyle.obs import OBS_DIM
-from playstyle.training import make_agent_controller, make_config
+from playstyle.training import CONTROLLER, make_agent_controller, make_config
 
 SCRATCH = ROOT / "runs" / "learner_cost"
 
@@ -92,10 +92,11 @@ def main():
     controller = make_agent_controller(width=args.width, precision=args.precision)
     config = make_config(timesteps_per_iteration=args.steps, buffer_size=args.buffer, batch_size=args.steps,
                          n_minibatches=max(1, args.steps // 50_000), n_epochs=args.epochs, save_folder=str(SCRATCH))
-    controller.set_space_types({0: {"blue-0": (("real", OBS_DIM), ("discrete", N_ACTIONS))}})
-    controller.load(DerivedAgentControllerConfig(config.agent_controller_config, config.base_config,
-                                                 config.process_config, str(SCRATCH)))
-    actor = controller.learner.actor_critic.actor
+    controller.set_space_types(("real", OBS_DIM), ("discrete", N_ACTIONS))
+    controller.load(DerivedAgentControllerConfig(
+        CONTROLLER, controller.validate_config(config.agent_controllers_config[CONTROLLER]), config.base_config,
+        config.process_config, str(SCRATCH)))
+    actor = controller.learner.actor
 
     spent = defaultdict(float)
     ppo_data = []

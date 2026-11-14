@@ -1,4 +1,4 @@
-import lzma
+﻿import lzma
 import math
 import pickle
 from pathlib import Path
@@ -136,13 +136,13 @@ def test_actor_interface(obs, nets):
     actor, _ = nets
     torch.manual_seed(2)
     with torch.no_grad():
-        actions, log_probs = actor.get_actions(None, [o.numpy() for o in obs[:32]])
+        actions, log_probs = actor.get_action(None, [o.numpy() for o in obs[:32]])
         assert actions.shape == (32, 1) and actions.min() >= 0 and actions.max() < N_ACTIONS
         assert log_probs.shape == (32,) and log_probs.dtype == torch.float32
         again, entropy = actor.get_backprop_data(None, obs[:32], torch.as_tensor(actions))
         torch.testing.assert_close(again.view(-1), log_probs, atol=1e-6, rtol=0)
         assert again.shape == (32, 1) and entropy.dim() == 0
-        best, _ = actor.get_actions(None, obs[:32], deterministic=True)
+        best, _ = actor.get_action(None, obs[:32], deterministic=True)
         assert np.array_equal(best[:, 0], actor.logits(obs[:32]).argmax(dim=-1).numpy())
 
 

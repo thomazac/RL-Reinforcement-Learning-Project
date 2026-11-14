@@ -20,8 +20,8 @@ from collections.abc import Sequence
 
 import numpy as np
 import torch
-from rlgym_learn_algos.ppo.actor_critic.actor import Actor
-from rlgym_learn_algos.ppo.actor_critic.critic import Critic
+from rlgym_learn_algos.ppo.actor import Actor
+from rlgym_learn_algos.ppo.critic import Critic
 from torch import nn
 from torch.nn import functional as F
 
@@ -138,7 +138,7 @@ class EntityActor(Actor):
     def logits(self, obs_list):
         return self.net(_as_tensor(obs_list, self.device))
 
-    def get_actions(self, agent_id_list, obs_list, **kwargs):
+    def get_action(self, agent_id_list, obs_list, **kwargs):
         log_probs = F.log_softmax(self.logits(obs_list), dim=-1)
         if kwargs.get("deterministic"):
             action = log_probs.argmax(dim=-1, keepdim=True)

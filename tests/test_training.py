@@ -4,9 +4,8 @@ import random
 import numpy as np
 import pytest
 import torch
-from rlgym_learn_algos.ppo import GAETrajectoryProcessor, GAETrajectoryProcessorConfigModel, PPOLearnerConfigModel
-from rlgym_learn_algos.ppo.ppo_learner import DerivedPPOLearnerConfig, PPOLearner
-from rlgym_learn_algos.ppo.trajectory import Trajectory
+from rlgym_learn_algos.ppo import (DerivedPPOLearnerConfig, GAETrajectoryProcessor, GAETrajectoryProcessorConfigModel,
+                                   PPOLearner, PPOLearnerConfigModel, Trajectory)
 from rlgym_learn_algos.ppo.trajectory_processor import DerivedTrajectoryProcessorConfig
 from torch.nn.utils import parameters_to_vector
 
@@ -17,6 +16,7 @@ from playstyle.obs import OBS_DIM
 from playstyle.training import Learner, factories
 
 BATCH = 64
+REWARD_CLIP = None  # rlgym-learn-algos 0.2.6 divides rewards by the running return spread and does not clip
 
 
 class FixedBatches:
@@ -40,13 +40,13 @@ def loaded(learner, device="cpu", checkpoint=None):
     torch.manual_seed(0)  # same starting weights for every learner
     learner.load(DerivedPPOLearnerConfig(
         learner_config=PPOLearnerConfigModel(n_epochs=2, batch_size=BATCH, n_minibatches=2, device=device),
-        agent_controller_name=None, obs_space=("real", OBS_DIM), action_space=("discrete", N_ACTIONS),
+        agent_controller_name="test", obs_space=("real", OBS_DIM), action_space=("discrete", N_ACTIONS),
         checkpoint_load_folder=None if checkpoint is None else str(checkpoint)))
     return learner
 
 
 def weights(learner):
-    return parameters_to_vector(learner.actor_critic.parameters()).detach().cpu()
+    return parameters_to_vector([*learner.actor.parameters(), *learner.critic.parameters()]).detach().cpu()
 
 
 def test_float32_update_is_the_rlgym_learn_update():
@@ -134,8 +134,7 @@ def test_truncated_trajectories_bootstrap_from_their_final_observation():
     (the one before the reset); a terminated one stops there."""
     processor = GAETrajectoryProcessor()
     processor.load(DerivedTrajectoryProcessorConfig(
-        GAETrajectoryProcessorConfigModel(standardize_rewards=False, reward_clip=None), "test",
-        torch.float32, torch.device("cpu"), 0))
+        GAETrajectoryProcessorConfigModel(standardize_returns=False), "test", torch.float32, torch.device("cpu")))
     rng = np.random.default_rng(0)
     trajectories, expected = [], []
     for i, truncated in enumerate((True, False, True, False)):
@@ -149,6 +148,26 @@ def test_truncated_trajectories_bootstrap_from_their_final_observation():
         expected.append(hand_gae(rewards, values, final_value, truncated))
     (_, _, _, _, _, advantages), _ = processor.process_trajectories(trajectories)
     assert np.allclose(advantages.numpy(), np.concatenate(expected), atol=1e-4)
+
+
+@pytest.mark.parametrize("clip", [None, 10.0])
+def test_reward_scaling(clip):
+    """Which reward clip rlgym-learn-algos applies: the running return spread starts at exactly 1, so rewards
+    of +-50 pass through unscaled, and whether they come out at +-50 or +-10 shows any clip."""
+    processor = GAETrajectoryProcessor()
+    processor.load(DerivedTrajectoryProcessorConfig(
+        GAETrajectoryProcessorConfigModel(standardize_returns=True), "test", torch.float32, torch.device("cpu")))
+    n = 30
+    rewards = np.zeros(n)
+    rewards[[5, 20]] = 50.0, -50.0
+    values = np.zeros(n)
+    trajectory = Trajectory("blue-0", [np.zeros(OBS_DIM, np.float32)] * n, [np.zeros(1, np.int64)] * n,
+                            torch.zeros(n), list(rewards), torch.zeros(n), np.zeros(OBS_DIM, np.float32),
+                            torch.tensor(0.0), False)
+    (_, _, _, _, _, advantages), _ = processor.process_trajectories([trajectory])
+    scaled = rewards if clip is None else np.clip(rewards, -clip, clip)
+    matches = np.allclose(advantages.numpy(), hand_gae(scaled, values, 0.0, False), atol=1e-3)
+    assert matches == (clip == REWARD_CLIP)
 
 
 def test_checkpoint_records_versions_and_only_loads_matching_observations(tmp_path):
