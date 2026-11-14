@@ -16,6 +16,7 @@ WARMUP comes from scripted normal-vs-normal games (scripts/profile_warmup.py), e
 never demo on purpose, so it uses the GC1 2s replay mean (0.13 demos/min; p90 0.34, max 0.77 over 120
 player-games). Pair-symmetric features (last_man, challenge, touch_share) average exactly 0.5 over any population.
 Demos are rare, so demo_rate averages over a longer window; one demo adds 60 / (90 * 0.75) ~ 0.9 and decays.
+The observation reads demo_rate through 2 * tanh(x / 2) (observed()): bursts stay below 2, normal values barely move.
 """
 
 import numpy as np
@@ -26,6 +27,17 @@ EMA_SECONDS = np.array([25.0, 25.0, 25.0, 25.0, 90.0, 25.0])
 MAX_SPEED = 2300.0
 DEMO_SCALE = 0.75  # demos per minute that reads as 1.0: a 2x-baseline Demo Specialist reads ~0.5-1
 WARMUP = np.array([0.725, 0.500, 0.425, 0.500, 0.173, 0.500])  # scripted 10 sim-minutes, seed 0; demo from replays
+
+
+DEMO_SOFT_CAP = 2.0
+
+
+def observed(values):
+    """Profile as the observation reads it: the running averages, with demo_rate soft-capped."""
+    out = np.array(values, dtype=np.float64)
+    i = FEATURES.index("demo_rate")
+    out[i] = DEMO_SOFT_CAP * np.tanh(out[i] / DEMO_SOFT_CAP)
+    return out
 
 
 def _teammate(agent, state):

@@ -7,6 +7,7 @@ resets where the original did.
 """
 
 import argparse
+import collections
 import copy
 import lzma
 import pickle
@@ -24,41 +25,36 @@ OUT = Path("tests/fixtures/obs_v1_reference.pkl.xz")
 INPUT_KEYS = ("obs_ttb", "obs_ball_slices", "profile", "prev_action", "match", "kickoff")
 
 
-def run(policy, steps, seed, skip=0, keep=True):
-    """Seeded and deterministic; the first `skip` steps play out unrecorded (the profile still averages them)."""
+def run(policy, steps, seed, around_demo=False, max_steps=12000):
+    """Record `steps` consecutive steps. With around_demo, keep a rolling window and stop once the first demo
+    sits in its middle (single pass: long seeded runs aren't reproducible step for step)."""
     random.seed(seed)
     np.random.seed(seed)
     rng = np.random.default_rng(seed)
     env, bot = make_env(seed=seed), RoleBot(seed=seed, team_modes={0: "demo", 1: "normal"})
     env.reset()
-    rows, start, first_demo = [], True, None
-    for i in range(skip + steps):
-        if i >= skip and keep:
-            rows.append(dict(
-                state=copy.deepcopy(env.state), start=start,
-                info=copy.deepcopy({k: env.shared_info[k] for k in INPUT_KEYS}),
-                obs=env.obs_builder.build_obs(env.agents, env.state, env.shared_info),
-            ))
-        if first_demo is None and any(c.is_demoed for c in env.state.cars.values()):
-            first_demo = i
+    rows, start, demo_at = collections.deque(maxlen=steps), True, None
+    for i in range(max_steps):
+        rows.append(dict(
+            state=copy.deepcopy(env.state), start=start,
+            info=copy.deepcopy({k: env.shared_info[k] for k in INPUT_KEYS}),
+            obs=env.obs_builder.build_obs(env.agents, env.state, env.shared_info),
+        ))
+        if demo_at is None and any(c.is_demoed for c in env.state.cars.values()):
+            demo_at = i
+        if (not around_demo and len(rows) == steps) or (demo_at is not None and i - demo_at >= steps // 2):
+            return list(rows)
         actions = bot.act(env.state, env.shared_info) if policy == "scripted" else \
             {a: rng.integers(0, 90, size=1) for a in env.agents}
         _, _, term, trunc = env.step(actions)
         start = any(term.values()) or any(trunc.values())
         if start:
             env.reset()
-    return rows, first_demo
+    raise SystemExit(f"no demo in {max_steps} steps of scripted demo play; try another seed")
 
 
 def record(steps_per_policy=400, seed=0):
-    _, first_demo = run("scripted", 6000, seed, keep=False)
-    if first_demo is None:
-        raise SystemExit("no demo in 400 s of scripted demo play; try another seed")
-    skip = max(first_demo - steps_per_policy // 2, 0)
-    scripted, _ = run("scripted", steps_per_policy, seed, skip=skip)
-    scripted[0]["skipped"] = skip
-    random_rows, _ = run("random", steps_per_policy, seed)
-    return scripted + random_rows
+    return run("scripted", steps_per_policy, seed, around_demo=True) + run("random", steps_per_policy, seed)
 
 
 def main():

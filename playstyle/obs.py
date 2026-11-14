@@ -1,14 +1,16 @@
 """Entity observation builder. Changing the layout means retraining; bump OBS_LAYOUT when it changes.
 
 Per agent, mirrored for orange so one policy plays both sides (x and y flipped):
-  self       22  position, velocity, angular velocity (absolute); forward, up; boost; on ground; has flip;
-                 has jump; demoed; TTB (scaled) and TTB reachable
-  teammate   22  same, but position and velocity relative to self (world-aligned, not rotated)
-  opponents  2x22, ordered by agent id
-  ball       27  position, velocity, angular velocity (absolute); position and velocity relative to self;
-                 position in self's frame (forward, right, up); predicted position at +0.5, +1, +2 s
-  global     52  34 boost pad timers; score difference; time remaining; overtime; kickoff; previous action (8);
-                 teammate profile (6, see profile_v1)
+  cars       4x31  self, teammate, then opponents by agent id. Every block has the same fields with the same
+                   meaning, so one encoder reads all four:
+                   position, velocity, angular velocity, forward, up (15, field frame);
+                   position and velocity relative to the observing agent (6, zero in the self block);
+                   ball position in this car's own frame: forward, right, up (3);
+                   boost; on ground; has flip; has jump; demoed (5); TTB (scaled) and TTB reachable (2)
+  ball       24    position, velocity, angular velocity; position and velocity relative to self;
+                   predicted position at +0.5, +1, +2 s
+  global     52    34 boost pad timers; score difference; time remaining; overtime; kickoff; previous action (8);
+                   teammate profile (6, see profile_v1; the network routes it to the teammate token)
 TTB and the ball prediction come from the frozen estimator (shared_info["obs_ttb"], ["obs_ball_slices"]),
 the profile from the frozen profile_v1 (shared_info["profile"]).
 """
@@ -21,7 +23,7 @@ from rlgym.api import ActionParser, ObsBuilder
 from . import profile_v1, ttb_v1
 
 OBS_LAYOUT = "entity-v1"
-CAR_DIM, BALL_DIM, GLOBAL_DIM = 22, 27, 52
+CAR_DIM, BALL_DIM, GLOBAL_DIM = 31, 24, 52
 OBS_DIM = 4 * CAR_DIM + BALL_DIM + GLOBAL_DIM
 
 POS_COEF, VEL_COEF, ANG_VEL_COEF = 1 / 2300, 1 / 2300, 1 / 5.5
@@ -95,26 +97,27 @@ class EntityObs(ObsBuilder):
             others = [j for j in range(len(ids)) if j != i and team[j] == team[i]] + \
                      [j for j in range(len(ids)) if team[j] != team[i]]
 
-            def car_block(j, relative):
+            def car_block(j):
                 p, v = pos[j] * m, vel[j] * m
-                if relative:
-                    p, v = p - pos[i] * m, v - vel[i] * m
-                return np.concatenate([p * POS_COEF, v * VEL_COEF, ang[j] * m * ANG_VEL_COEF,
-                                       fwd[j] * m, up[j] * m, flags[j], ttb_cols[j]])
+                return np.concatenate([
+                    p * POS_COEF, v * VEL_COEF, ang[j] * m * ANG_VEL_COEF, fwd[j] * m, up[j] * m,
+                    (p - pos[i] * m) * POS_COEF, (v - vel[i] * m) * VEL_COEF,
+                    rot[j].T @ (b_pos - pos[j]) * POS_COEF,  # unaffected by mirroring: car and ball rotate alike
+                    flags[j], ttb_cols[j]])
 
             bp, bv = b_pos * m, b_vel * m
             score = float(match.get("score_diff", 0)) * (-1 if orange else 1)
-            parts = [car_block(i, False)] + [car_block(j, True) for j in others] + [
+            parts = [car_block(i)] + [car_block(j) for j in others] + [
                 bp * POS_COEF, bv * VEL_COEF, b_ang * m * ANG_VEL_COEF,
                 (bp - pos[i] * m) * POS_COEF, (bv - vel[i] * m) * VEL_COEF,
-                rot[i].T @ (b_pos - pos[i]) * POS_COEF,  # same on both sides: mirroring rotates car and ball alike
                 (predicted * m).ravel() * POS_COEF,
                 (pads[::-1] if orange else pads) * PAD_TIMER_COEF,
                 [np.clip(score, -SCORE_CAP, SCORE_CAP) / SCORE_CAP,
                  float(match.get("time_remaining", MATCH_SECONDS)) / MATCH_SECONDS,
                  float(match.get("overtime", False)), kickoff],
                 prev.get(agent, np.zeros(8)),
-                profile[ids[others[0]]] if others and team[others[0]] == team[i] else profile_v1.WARMUP,
+                profile_v1.observed(profile[ids[others[0]]] if others and team[others[0]] == team[i]
+                                    else profile_v1.WARMUP),
             ]
             obs[agent] = np.concatenate(parts).astype(np.float32)
         return obs

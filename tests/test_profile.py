@@ -33,7 +33,17 @@ TTB = {"b0": 0.5, "b1": 1.5, "o0": 0.8, "o1": 2.0}
 def test_frozen_constants():
     np.testing.assert_array_equal(profile_v1.WARMUP, [0.725, 0.500, 0.425, 0.500, 0.173, 0.500])
     np.testing.assert_array_equal(profile_v1.EMA_SECONDS, [25, 25, 25, 25, 90, 25])
-    assert (profile_v1.DEMO_SCALE, profile_v1.VERSION) == (0.75, "profile-v1")
+    assert (profile_v1.DEMO_SCALE, profile_v1.DEMO_SOFT_CAP, profile_v1.VERSION) == (0.75, 2.0, "profile-v1")
+
+
+def test_demo_rate_soft_cap():
+    i = F["demo_rate"]
+    for raw, lo, hi in ((0.17, 0.169, 0.17), (0.9, 0.84, 0.86), (2.7, 1.74, 1.76), (50.0, 1.99, 2.0)):
+        v = profile_v1.WARMUP.copy()
+        v[i] = raw
+        out = profile_v1.observed(v)
+        assert lo <= out[i] <= hi, raw
+        np.testing.assert_array_equal(np.delete(out, i), np.delete(v, i))
 
 
 def test_position_speed_and_challenge():
