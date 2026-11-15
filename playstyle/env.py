@@ -9,6 +9,7 @@ from rlgym.rocket_league.state_mutators import FixedTeamSizeMutator, MutatorSequ
 
 from .match import MatchEngine, MatchOverCondition, RandomMatchStart, SeededKickoff
 from .obs import EntityObs, RecordingActionParser
+from .rewards import ShapedReward
 from .shared_info import TTBRoleProvider
 
 TICK_SKIP = 8
@@ -33,9 +34,11 @@ def make_env(team_size=2, obs_builder=None, reward_fn=None, reward_ttb="v1", coo
     )
 
 
-def build_env(reward_ttb="v1", coordination=False):
-    """The env one RLGym-Learn process runs (Phase 1a setup by default). RLGym-Learn seeds Python's global
-    random with a different number in each process before calling this, so drawing the env seed from it gives
-    every process its own kickoffs and starting scores, repeatable from the run's seed. This module stays free
-    of torch so env processes start fast and stay small."""
-    return make_env(reward_ttb=reward_ttb, coordination=coordination, seed=random.getrandbits(32))
+def build_env(reward_ttb="v1", coordination=False, weights=None, team_spirit=0.0, opponent_scale=1.0):
+    """The env one RLGym-Learn process runs; the defaults are Phase 1a (playstyle.rewards.PHASE_1A, no
+    coordination, team spirit 0). RLGym-Learn seeds Python's global random with a different number in each
+    process before calling this, so drawing the env seed from it gives every process its own kickoffs and
+    starting scores, repeatable from the run's seed. This module stays free of torch so env processes start
+    fast and stay small. Use functools.partial to pass other settings; RLGym-Learn calls it with no arguments."""
+    return make_env(reward_ttb=reward_ttb, coordination=coordination, seed=random.getrandbits(32),
+                    reward_fn=ShapedReward(weights, team_spirit, opponent_scale))

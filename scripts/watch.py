@@ -5,6 +5,7 @@
     python scripts/watch.py --save runs/roles.gif --seconds 20
     python scripts/watch.py --no-draw --seconds 600           # role-change stats only
     python scripts/watch.py --blue-mode chaser                # watch a deliberately bad team
+    python scripts/watch.py --checkpoint runs/train/<run>/checkpoints/ppo/<run>-<id>/<step id> --save game.mp4 --seconds 180
 
 Labels show role (LOCK when the first man is committed), TTB and height. Marker size grows with
 height. Red marks show coordination events: double-commit on the penalized car, nobody challenging
@@ -12,12 +13,16 @@ on the first man, nobody home next to the goal.
 """
 
 import argparse
+import sys
 import time
+from pathlib import Path
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from playstyle.ball_prediction import TICK_RATE
-from playstyle.env import TICK_SKIP, make_env
+from playstyle.env import TICK_SKIP, build_env, make_env
 from playstyle.roles import FIRST, MIN_HOLD
 from playstyle.scripted import MODES, RoleBot
 
@@ -111,31 +116,62 @@ class RoleStats:
                 f"{np.mean(h < MIN_HOLD) * 100:.0f}% (only touch, demo or moving-away releases may do this)")
 
 
+def load_policy(checkpoint, device):
+    """The actor from a training checkpoint folder (the one holding ppo_learner/). Network width is read from
+    the saved weights; the checkpoint must have been trained on the current observation versions."""
+    import torch
+
+    from playstyle import versions
+    from playstyle.network import EntityActor
+
+    learner = Path(checkpoint) / "ppo_learner"
+    versions.check(learner)
+    state = torch.load(learner / "actor.pt", map_location=device)
+    d_model, d_ff = state["net.trunk.kind"].shape[1], state["net.trunk.blocks.0.ff.0.weight"].shape[0]
+    actor = EntityActor(device=device, graphs=False, d_model=d_model, d_ff=d_ff)
+    actor.load_state_dict(state)
+    return actor.eval()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--policy", choices=("scripted", "random"), default="scripted")
+    ap.add_argument("--checkpoint", help="play all four cars with a trained policy from this checkpoint folder")
+    ap.add_argument("--deterministic", action="store_true", help="with --checkpoint: always the likeliest action")
     ap.add_argument("--seconds", type=float, default=120)
-    ap.add_argument("--save", help="write a GIF instead of opening a window")
+    ap.add_argument("--save", help="write the video to this file (.gif, or .mp4 through ffmpeg) instead of a window")
     ap.add_argument("--no-draw", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--blue-mode", choices=MODES, default="normal")
     ap.add_argument("--orange-mode", choices=MODES, default="normal")
     args = ap.parse_args()
 
-    env = make_env()
+    actor = None
+    if args.checkpoint:
+        import torch
+
+        actor = load_policy(args.checkpoint, "cuda" if torch.cuda.is_available() else "cpu")
+    # Trained policies play the env they trained in. Roles are switched on for the overlay; they only add
+    # shared-info entries for the reward and overlay, which the observation never reads.
+    env = build_env(coordination=True) if actor is not None else make_env()
     bot = RoleBot(seed=args.seed, team_modes={0: args.blue_mode, 1: args.orange_mode})
     rng = np.random.default_rng(args.seed)
-    env.reset()
-    stats, frames = RoleStats(), []
+    obs = env.reset()
+    stats, frames, touches, goals = RoleStats(), [], 0, 0
+    mp4 = args.save and args.save.endswith(".mp4")
 
-    fig = ax = None
+    fig = ax = writer = None
     if not args.no_draw:
         import matplotlib
         if args.save:
             matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         fig, ax = plt.subplots(figsize=(5, 6.5))
-        if not args.save:
+        if mp4:
+            from matplotlib.animation import FFMpegWriter
+            writer = FFMpegWriter(fps=round(1 / DT))
+            writer.setup(fig, args.save, dpi=120)
+        elif not args.save:
             plt.ion()
             plt.show()
 
@@ -144,7 +180,9 @@ def main():
         stats.update(env.state, env.shared_info["roles"], t, reset)
         if ax is not None:
             draw(ax, env.state, env.shared_info, t)
-            if args.save:
+            if writer is not None:
+                writer.grab_frame()
+            elif args.save:
                 fig.canvas.draw()
                 frames.append(np.asarray(fig.canvas.buffer_rgba())[..., :3].copy())
             else:
@@ -152,17 +190,30 @@ def main():
                 plt.pause(max(1e-3, DT - (time.perf_counter() - start)))
                 if not plt.fignum_exists(fig.number):
                     break
-        if args.policy == "scripted":
+        if actor is not None:
+            import torch
+
+            with torch.no_grad():
+                chosen, _ = actor.get_action(None, [obs[a] for a in env.agents], deterministic=args.deterministic)
+            actions = {a: np.asarray(c).reshape(1) for a, c in zip(env.agents, chosen)}
+        elif args.policy == "scripted":
             actions = bot.act(env.state, env.shared_info)
         else:
             actions = {a: np.array([rng.integers(90)]) for a in env.agents}
-        _, _, term, trunc = env.step(actions)
+        obs, _, term, trunc = env.step(actions)
+        touches += sum(c.ball_touches > 0 for c in env.state.cars.values())
+        goals += bool(env.state.goal_scored)
         t += DT
         reset = any(term.values()) or any(trunc.values())
         if reset:
-            env.reset()
+            obs = env.reset()
 
     print(stats.summary(t))
+    print(f"{touches / len(env.agents) / (t / 60):.2f} touches per car per minute, {goals} goals in {t / 60:.1f} sim-minutes")
+    if writer is not None:
+        writer.finish()
+        print(f"saved {args.save}")
+        return
     if args.save:
         from PIL import Image
         imgs = [Image.fromarray(f) for f in frames[::2]]

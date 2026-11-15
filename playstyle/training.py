@@ -11,10 +11,12 @@ How RLGym-Learn spends an iteration (read from its source):
 """
 
 import json
+import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
+import psutil
 import torch
 from rlgym_learn import (BaseConfigModel, LearningCoordinatorConfigModel, ProcessConfigModel, PyAnySerdeType,
                          SerdeTypesModel)
@@ -35,7 +37,12 @@ from rlgym_learn_algos.ppo import (
 from torch.nn.utils import clip_grad_norm_, parameters_to_vector
 
 from . import versions
+from .ball_prediction import TICK_RATE
+from .env import TICK_SKIP
 from .network import EntityActor, EntityCritic
+from .rewards import PHASE_1A
+
+STEPS_PER_SECOND = TICK_RATE / TICK_SKIP  # agent decisions per second of game time
 
 # Token width -> network settings. Width is fixed for a run and everything trained from it.
 NETWORKS = {128: dict(d_model=128, n_heads=4, d_ff=256), 256: dict(d_model=256, n_heads=4, d_ff=512)}
@@ -51,7 +58,7 @@ def serde_types():
         agent_id_serde_type=PyAnySerdeType.STRING(),  # "blue-0", "orange-1", ...
         obs_serde_type=PyAnySerdeType.NUMPY(np.float32),
         action_serde_type=PyAnySerdeType.NUMPY(np.int64),
-        reward_serde_type=PyAnySerdeType.FLOAT(),
+        reward_serde_type=PyAnySerdeType.NUMPY(np.float32),  # [reward, raw components...], playstyle/rewards.py
         obs_space_serde_type=space,
         action_space_serde_type=space,
     )
@@ -93,22 +100,36 @@ class RunStats(GAETrajectoryProcessorData):
     largest_scaled_reward: float = 0.0  # largest |reward / return spread| before clipping
     largest_obs_jump: float = 0.0
     nonfinite_obs: int = 0
+    component_means: dict = field(default_factory=dict)  # raw reward component -> mean per agent-step
 
 
 class ClippedGAETrajectoryProcessor(GAETrajectoryProcessor):
     """rlgym-learn-algos 0.2.6's GAE with the scaled rewards clipped at +-REWARD_CLIP (0.2.6 divides rewards by
     the running return spread but does not clip). Returns, and so the return statistics, stay in raw reward
-    units as in 0.2.6. Also reports the observation-jump monitor, since every trajectory passes through here."""
+    units as in 0.2.6. Also reports the observation-jump monitor, since every trajectory passes through here.
+
+    Rewards may be plain numbers or vectors [reward, raw components...] (playstyle/rewards.py); PPO trains on the
+    first entry, and the others are averaged per component for the log."""
+
+    def __init__(self, component_names=tuple(PHASE_1A)):
+        super().__init__()
+        self.component_names = list(component_names)
 
     def process_trajectories(self, trajectories):
         rust = self.rust_gae_trajectory_processor
         spread = float(self.return_stats.std[0]) if self.standardize_returns else 1.0
+        rewards = [np.asarray(t.reward_list, dtype=np.float64) for t in trajectories]
+        totals = [r[:, 0] if r.ndim == 2 else r for r in rewards]
+        parts = [r[:, 1:] for r in rewards if r.ndim == 2]
+
+        def with_rewards(t, r):
+            return Trajectory(t.agent_id, t.obs_list, t.action_list, t.log_probs, r.tolist(), t.val_preds,
+                              t.final_obs, t.final_val_pred, t.truncated)
+
         ids, obs, actions, log_probs, values, _, returns, avg_reward, avg_return = \
-            rust.process_trajectories(trajectories, spread)
-        scaled = [np.asarray(t.reward_list, dtype=np.float64) / spread for t in trajectories]
-        clipped = [Trajectory(t.agent_id, t.obs_list, t.action_list, t.log_probs,
-                              np.clip(s, -REWARD_CLIP, REWARD_CLIP).tolist(), t.val_preds, t.final_obs,
-                              t.final_val_pred, t.truncated) for t, s in zip(trajectories, scaled)]
+            rust.process_trajectories([with_rewards(t, r) for t, r in zip(trajectories, totals)], spread)
+        scaled = [r / spread for r in totals]
+        clipped = [with_rewards(t, np.clip(s, -REWARD_CLIP, REWARD_CLIP)) for t, s in zip(trajectories, scaled)]
         advantages = rust.process_trajectories(clipped, 1.0)[5]
         if self.standardize_returns:
             for sample in returns[:min(self.max_returns_per_stats_increment, len(returns))]:
@@ -116,27 +137,60 @@ class ClippedGAETrajectoryProcessor(GAETrajectoryProcessor):
 
         all_scaled = np.concatenate(scaled) if scaled else np.zeros(1)
         largest_jump, nonfinite = observation_jumps(trajectories)
+        means = np.concatenate(parts).mean(axis=0) if parts else []
         stats = RunStats(average_reward=avg_reward, average_undiscounted_episodic_return=avg_return,
                          average_return=returns.mean(), return_standard_deviation=returns.std(),
                          reward_clip_share=float((np.abs(all_scaled) > REWARD_CLIP).mean()),
                          largest_scaled_reward=float(np.abs(all_scaled).max()),
-                         largest_obs_jump=largest_jump, nonfinite_obs=nonfinite)
+                         largest_obs_jump=largest_jump, nonfinite_obs=nonfinite,
+                         component_means={n: float(m) for n, m in zip(self.component_names, means)})
         return ((ids, obs, actions, log_probs.to(device=self.device), values.to(device=self.device),
                  torch.from_numpy(advantages).to(device=self.device)), stats)
 
 
-class RunLogger(PPOMetricsLogger):
-    """RLGym-Learn's PPO metrics plus this project's monitors, printed each iteration and appended as one JSON
-    line per iteration to `path` (if given). Prints a warning when a monitor crosses its threshold."""
+class ExperienceBuffer(NumpyExperienceBuffer):
+    """NumpyExperienceBuffer that also restores the trajectory processor's running return statistics from a
+    checkpoint. rlgym-learn-algos 0.2.6 saves them but never passes the checkpoint folder on when loading, so a
+    resumed run would restart reward scaling from a spread of 1 (found by scripts/train.py's resume check)."""
 
-    def __init__(self, path=None):
+    def load(self, config):
+        super().load(config)
+        if config.checkpoint_load_folder is not None:
+            self.trajectory_processor.checkpoint_load_folder = config.checkpoint_load_folder
+            self.trajectory_processor._load_from_checkpoint()
+
+
+def resources():
+    """Memory of this process, of the env processes (its children) and of the GPU, in GB."""
+    me = psutil.Process()
+    children = sum(c.memory_info().rss for c in me.children(recursive=True) if c.is_running())
+    return {"Main Process GB": me.memory_info().rss / 2**30, "Env Processes GB": children / 2**30,
+            "GPU Allocated GB": torch.cuda.memory_allocated() / 2**30 if torch.cuda.is_available() else 0.0,
+            "GPU Reserved GB": torch.cuda.memory_reserved() / 2**30 if torch.cuda.is_available() else 0.0}
+
+
+class RunLogger(PPOMetricsLogger):
+    """RLGym-Learn's PPO metrics plus this project's: per-component reward means (raw and weighted), touches
+    per minute, the monitors and memory. Printed each iteration and appended as one JSON line per iteration to
+    `path` (if given). Prints a warning when a monitor crosses its threshold."""
+
+    def __init__(self, path=None, weights=None):
         super().__init__()
         self.path = path
+        self.weights = dict(PHASE_1A if weights is None else weights)
         self.warnings = []
 
     def collect_agent_metrics(self, data):
         super().collect_agent_metrics(data)
         tp, ppo = data.trajectory_processor_data, data.ppo_data
+        means = tp.component_means
+        self.agent_metrics["Reward Components"] = {
+            **{f"{n} (raw mean)": m for n, m in means.items()},
+            **{f"{n} (weighted mean)": m * self.weights.get(n, 0.0) for n, m in means.items()},
+        }
+        if "touch" in means:  # touches per car per minute of game time
+            self.agent_metrics["Reward Components"]["Touches per Minute"] = means["touch"] * STEPS_PER_SECOND * 60
+        self.agent_metrics["Resources"] = resources()
         self.agent_metrics["Monitors"] = {
             "Reward Clip Share": tp.reward_clip_share,
             "Largest Scaled Reward": tp.largest_scaled_reward,
@@ -176,8 +230,11 @@ class Learner(PPOLearner):
     It should be very close to 1; a drift as the policy sharpens points at the float16 mismatch first.
 
     Checkpoints record the observation and reward versions (playstyle/versions.py) next to the weights, and a
-    checkpoint trained on different observation versions will not load.
+    checkpoint trained on different observation versions will not load. They also keep the float16 gradient
+    scale, which PPOLearner's checkpoints leave out.
     """
+
+    SCALER_FILE = "grad_scaler.pt"
 
     def __init__(self, actor_factory, critic_factory, precision="float16", reward_ttb="v1"):
         super().__init__(actor_factory, critic_factory)
@@ -186,20 +243,27 @@ class Learner(PPOLearner):
         self.reward_ttb = reward_ttb
         self.scaler = None
 
+    def load(self, config):
+        device = config.learner_config.device
+        self.scaler = torch.amp.GradScaler(device.type, enabled=self.precision == "float16" and device.type == "cuda")
+        super().load(config)
+
     def save_checkpoint(self, folder_path):
         super().save_checkpoint(folder_path)
         versions.write(folder_path, self.reward_ttb)
+        torch.save(self.scaler.state_dict(), os.path.join(folder_path, self.SCALER_FILE))
 
     def _load_from_checkpoint(self):
-        versions.check(self.config.checkpoint_load_folder)
+        folder = self.config.checkpoint_load_folder
+        versions.check(folder)
         super()._load_from_checkpoint()
+        if os.path.exists(os.path.join(folder, self.SCALER_FILE)):
+            self.scaler.load_state_dict(torch.load(os.path.join(folder, self.SCALER_FILE)))
 
     def learn(self, exp):
         cfg = self.config.learner_config
         device = cfg.device
-        half = self.precision == "float16" and device.type == "cuda"
-        if self.scaler is None:
-            self.scaler = torch.amp.GradScaler(device.type, enabled=half)
+        half = self.scaler.is_enabled()
         scaler = self.scaler
         actor_before = parameters_to_vector(self.actor.parameters())
         critic_before = parameters_to_vector(self.critic.parameters())
@@ -274,7 +338,7 @@ def factories(width):
 
 
 def make_agent_controller(width=WIDTH, precision="float16", reward_ttb="v1", metrics_logger=None):
-    controller = PPOAgentController(*factories(width), NumpyExperienceBuffer(ClippedGAETrajectoryProcessor()),
+    controller = PPOAgentController(*factories(width), ExperienceBuffer(ClippedGAETrajectoryProcessor()),
                                     metrics_logger=metrics_logger)
     controller.learner = Learner(*factories(width), precision=precision, reward_ttb=reward_ttb)
     return controller

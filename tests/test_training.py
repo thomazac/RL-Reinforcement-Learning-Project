@@ -4,8 +4,9 @@ import random
 import numpy as np
 import pytest
 import torch
-from rlgym_learn_algos.ppo import (DerivedPPOLearnerConfig, GAETrajectoryProcessor, GAETrajectoryProcessorConfigModel,
-                                   PPOLearner, PPOLearnerConfigModel, Trajectory)
+from rlgym_learn_algos.ppo import (DerivedExperienceBufferConfig, DerivedPPOLearnerConfig, ExperienceBufferConfigModel,
+                                   GAETrajectoryProcessor, GAETrajectoryProcessorConfigModel, PPOLearner,
+                                   PPOLearnerConfigModel, Trajectory)
 from rlgym_learn_algos.ppo.trajectory_processor import DerivedTrajectoryProcessorConfig
 from torch.nn.utils import parameters_to_vector
 
@@ -13,8 +14,8 @@ from playstyle import versions
 from playstyle.env import build_env
 from playstyle.network import N_ACTIONS
 from playstyle.obs import OBS_DIM
-from playstyle.training import (KICKOFF, REWARD_CLIP, SELF_DEMOED, ClippedGAETrajectoryProcessor, Learner, factories,
-                                observation_jumps)
+from playstyle.training import (KICKOFF, REWARD_CLIP, SELF_DEMOED, ClippedGAETrajectoryProcessor, ExperienceBuffer,
+                                Learner, factories, observation_jumps)
 
 BATCH = 64
 
@@ -194,6 +195,48 @@ def test_clipped_processor_matches_rlgym_learn_when_nothing_is_clipped():
     assert ours.return_stats.std[0] != 1.0
 
 
+def test_vector_rewards_train_on_the_first_entry_and_log_the_rest():
+    rng = np.random.default_rng(2)
+    plain, vector = gae_processor(ClippedGAETrajectoryProcessor), gae_processor(ClippedGAETrajectoryProcessor)
+    n_parts = len(vector.component_names)
+    batch_plain, batch_vector, parts = [], [], []
+    for n in (30, 45):
+        rewards, values = rng.normal(0, 0.3, n), rng.normal(0, 1, n)
+        extra = rng.uniform(0, 1, (n, n_parts))
+        parts.append(extra)
+        batch_plain.append(trajectory(rewards, values, 0.4, True))
+        batch_vector.append(trajectory(list(np.column_stack([rewards, extra]).astype(np.float32)), values, 0.4, True))
+    (*_, a), _ = plain.process_trajectories(batch_plain)
+    (*_, b), stats = vector.process_trajectories(batch_vector)
+    assert np.allclose(a.numpy(), b.numpy(), atol=1e-5)
+    expected = np.concatenate(parts).mean(axis=0)
+    assert list(stats.component_means) == vector.component_names
+    assert np.allclose(list(stats.component_means.values()), expected, atol=1e-6)
+
+
+def test_experience_buffer_checkpoint_keeps_return_statistics(tmp_path):
+    def buffer(checkpoint=None):
+        b = ExperienceBuffer(ClippedGAETrajectoryProcessor())
+        b.load(DerivedExperienceBufferConfig(
+            ExperienceBufferConfigModel(max_size=1000, device="cpu",
+                                        trajectory_processor_config=GAETrajectoryProcessorConfigModel().model_dump()),
+            "test", 0, torch.float32, torch.device("cpu"), None if checkpoint is None else str(checkpoint)))
+        return b
+
+    rng = np.random.default_rng(3)
+    first = buffer()
+    for _ in range(3):
+        first.submit_experience([trajectory(rng.normal(0, 1, 60), rng.normal(0, 1, 60), 0.2, True)])
+    first.save_checkpoint(tmp_path)
+    stats = first.trajectory_processor.return_stats
+    assert stats.count > 2
+
+    resumed = buffer(tmp_path).trajectory_processor.return_stats
+    assert resumed.count == stats.count
+    assert np.allclose(resumed.running_mean, stats.running_mean) and np.allclose(resumed.std, stats.std)
+    assert len(buffer(tmp_path).values) == len(first.values)
+
+
 def test_observation_jump_monitor():
     n = 40
     obs = np.zeros((n + 1, OBS_DIM), np.float32)
@@ -226,6 +269,11 @@ def test_checkpoint_records_versions_and_only_loads_matching_observations(tmp_pa
 
     restored = loaded(Learner(*factories(128), precision="float32"), checkpoint=tmp_path)
     assert torch.equal(weights(restored), weights(learner))
+    assert restored.scaler.state_dict() == learner.scaler.state_dict()
+    for ours, theirs in ((restored.actor_optimizer, learner.actor_optimizer),
+                         (restored.critic_optimizer, learner.critic_optimizer)):
+        a, b = ours.state_dict()["state"], theirs.state_dict()["state"]
+        assert a.keys() == b.keys() and all(torch.equal(a[k]["exp_avg"], b[k]["exp_avg"]) for k in a)
 
     saved["obs_versions"]["layout"] = "entity-v0"
     (tmp_path / versions.FILENAME).write_text(json.dumps(saved))
