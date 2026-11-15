@@ -18,6 +18,7 @@ from playstyle.training import (KICKOFF, REWARD_CLIP, SELF_DEMOED, ClippedGAETra
                                 Learner, factories, observation_jumps)
 
 BATCH = 64
+DEVICES = ["cpu"] + (["cuda"] * torch.cuda.is_available())
 
 
 class FixedBatches:
@@ -37,10 +38,10 @@ class FixedBatches:
             yield tuple(x[lo:lo + batch_size] for x in self.data)
 
 
-def loaded(learner, device="cpu", checkpoint=None):
+def loaded(learner, device="cpu", checkpoint=None, n_minibatches=2):
     torch.manual_seed(0)  # same starting weights for every learner
     learner.load(DerivedPPOLearnerConfig(
-        learner_config=PPOLearnerConfigModel(n_epochs=2, batch_size=BATCH, n_minibatches=2, device=device),
+        learner_config=PPOLearnerConfigModel(n_epochs=2, batch_size=BATCH, n_minibatches=n_minibatches, device=device),
         agent_controller_name="test", obs_space=("real", OBS_DIM), action_space=("discrete", N_ACTIONS),
         checkpoint_load_folder=None if checkpoint is None else str(checkpoint)))
     return learner
@@ -62,6 +63,52 @@ def test_float32_update_is_the_rlgym_learn_update():
     for field in ("actor_entropy", "kl_divergence", "critic_loss", "sb3_clip_fraction",
                   "actor_update_magnitude", "critic_update_magnitude"):
         assert getattr(a, field) == pytest.approx(getattr(b, field), rel=1e-4, abs=1e-6), field
+
+
+def first_step_gradients(learner):
+    """Gradients each optimizer sees at its first step of learn(), as one vector per optimizer."""
+    seen = {}
+    for name, opt in (("actor", learner.actor_optimizer), ("critic", learner.critic_optimizer)):
+        step = opt.step
+
+        def recording(*a, _name=name, _opt=opt, _step=step, **kw):
+            if _name not in seen:
+                params = [p for g in _opt.param_groups for p in g["params"]]
+                seen[_name] = torch.cat([(p.grad if p.grad is not None else torch.zeros_like(p)).flatten()
+                                         for p in params]).detach().cpu().clone()
+            return _step(*a, **kw)
+
+        opt.step = recording
+    learner.learn(FixedBatches())
+    return seen
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_minibatch_split_and_sync_leave_the_gradient_unchanged(device):
+    """OverlappedController trains in small minibatches with a GPU sync after each; minibatches only split the
+    gradient sum, so the gradient must match one unsplit minibatch."""
+    whole = first_step_gradients(loaded(Learner(*factories(128), precision="float32"), device, n_minibatches=1))
+    chunked_learner = loaded(Learner(*factories(128), precision="float32"), device, n_minibatches=8)
+    chunked_learner.sync_minibatches = True
+    chunked = first_step_gradients(chunked_learner)
+    for name in ("actor", "critic"):
+        assert whole[name].abs().max() > 1e-4, name  # a real gradient, not zeros
+        assert torch.allclose(whole[name], chunked[name], atol=1e-6, rtol=0), \
+            f"{name}: max difference {(whole[name] - chunked[name]).abs().max():.2e}"
+
+
+def test_critic_warmup_trains_only_the_critic():
+    learner = loaded(Learner(*factories(128), precision="float32"))
+    learner.frozen_updates = 1
+    actor_before = parameters_to_vector(learner.actor.parameters()).detach().clone()
+    critic_before = parameters_to_vector(learner.critic.parameters()).detach().clone()
+    stats = learner.learn(FixedBatches())
+    assert stats.actor_frozen and learner.frozen_updates == 0
+    assert torch.equal(parameters_to_vector(learner.actor.parameters()), actor_before)
+    assert (parameters_to_vector(learner.critic.parameters()) - critic_before).abs().max() > 1e-4
+    stats = learner.learn(FixedBatches())  # warm-up over: the actor trains again
+    assert not stats.actor_frozen
+    assert (parameters_to_vector(learner.actor.parameters()) - actor_before).abs().max() > 1e-4
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="mixed precision needs a GPU")
@@ -89,9 +136,6 @@ class RecordingLoss(torch.nn.MSELoss):
     def forward(self, predicted, target):
         self.targets.append(target.detach().float().cpu().view(-1).clone())
         return super().forward(predicted, target)
-
-
-DEVICES = ["cpu"] + (["cuda"] * torch.cuda.is_available())
 
 
 @pytest.mark.parametrize("device", DEVICES)

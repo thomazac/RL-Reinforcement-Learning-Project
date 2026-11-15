@@ -91,6 +91,11 @@ def main():
     ap.add_argument("--steps", type=int, default=50_000_000, help="total agent-steps for the run")
     ap.add_argument("--stop-at", type=int, help="stop (with a checkpoint) once this many steps are done")
     ap.add_argument("--resume", help="checkpoint folder, or 'latest' for the run's newest checkpoint")
+    ap.add_argument("--init-from", help="start a new run from another run's checkpoint: weights and optimizer only "
+                                        "(fresh step count, return statistics and experience buffer)")
+    ap.add_argument("--critic-warmup", type=int, default=0,
+                    help="iterations at the start that train only the critic (use with --init-from on a new reward)")
+    ap.add_argument("--no-overlap", action="store_true", help="run the update in line instead of collecting during it")
     ap.add_argument("--procs", type=int, default=32)
     ap.add_argument("--width", type=int, default=256, choices=(128, 256))
     ap.add_argument("--precision", default="float16", choices=("float16", "float32"))
@@ -129,18 +134,21 @@ def main():
     weights = dict(PHASE_1A)
     env_fn = functools.partial(build_env, weights=weights, team_spirit=args.team_spirit,
                                opponent_scale=args.opponent_scale)
+    if args.init_from and resume:
+        raise SystemExit("--init-from starts a new run; use --resume to carry on an existing one")
     controller = make_agent_controller(width=args.width, precision=args.precision,
-                                       metrics_logger=RunLogger(path=run_dir / "log.jsonl", weights=weights))
+                                       metrics_logger=RunLogger(path=run_dir / "log.jsonl", weights=weights),
+                                       overlap=not args.no_overlap, init_from=args.init_from)
     config = make_config(n_proc=args.procs, lr=args.lr, gamma=args.gamma, ent_coef=args.ent_coef,
                          timestep_limit=stop - done,  # the coordinator counts from 0 on every start
                          save_folder=str(run_dir / "checkpoints"), run_name=args.run,
-                         save_every_ts=args.save_every, seed=args.seed)
+                         save_every_ts=args.save_every, seed=args.seed, overlap=not args.no_overlap)
     if resume:
         config.agent_controllers_config[CONTROLLER]["checkpoint_load_folder"] = str(resume)
 
     record = {
         "started": time.strftime("%Y-%m-%d %H:%M:%S"), "args": vars(args), "steps_done_at_start": done,
-        "resume_from": str(resume) if resume else None,
+        "resume_from": str(resume) if resume else None, "init_from": args.init_from,
         "reward": {"weights": weights, "team_spirit": args.team_spirit, "opponent_scale": args.opponent_scale,
                    "coordination": False, "reward_ttb": "v1"},
         "network": {"width": args.width, **NETWORKS[args.width], "obs_dim": OBS_DIM, "actions": N_ACTIONS},
@@ -166,6 +174,7 @@ def main():
 
     controller.save_checkpoint = save_with_state
     coordinator = LearningCoordinator(env_fn, {CONTROLLER: controller}, config)
+    controller.learner.frozen_updates = args.critic_warmup
 
     if resume:
         saved = json.loads((resume / RESUME_STATE).read_text())

@@ -89,7 +89,7 @@ def main():
 
     pieces = load_steps(args.steps, args.chunk)
     assert sum(len(p["obs"]) for p in pieces) == args.steps
-    controller = make_agent_controller(width=args.width, precision=args.precision)
+    controller = make_agent_controller(width=args.width, precision=args.precision, overlap=False)
     config = make_config(timesteps_per_iteration=args.steps, buffer_size=args.buffer, batch_size=args.steps,
                          n_minibatches=max(1, args.steps // 50_000), n_epochs=args.epochs, save_folder=str(SCRATCH))
     controller.set_space_types(("real", OBS_DIM), ("discrete", N_ACTIONS))

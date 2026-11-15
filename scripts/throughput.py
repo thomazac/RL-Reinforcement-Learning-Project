@@ -72,7 +72,9 @@ def main():
             for w in self.warnings:
                 print(f"WARNING: {w}", flush=True)
 
-    controller = make_agent_controller(width=args.width, precision=args.precision, metrics_logger=Logger())
+    # In line: the timing wrappers below measure collection and update as separate phases.
+    controller = make_agent_controller(width=args.width, precision=args.precision, metrics_logger=Logger(),
+                                       overlap=False)
     config = make_config(n_proc=args.procs, timesteps_per_iteration=args.steps, buffer_size=args.buffer,
                          batch_size=args.steps, n_minibatches=max(1, args.steps // 50_000), n_epochs=args.epochs,
                          timestep_limit=n_iterations * args.steps + args.steps // 2,
