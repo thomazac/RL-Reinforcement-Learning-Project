@@ -1,13 +1,16 @@
-"""Top-down viewer with the TTB and role overlay.
+"""Game viewer. Default: a 3D perspective view of the arena with simple shapes (cars as oriented boxes, the ball
+with its predicted path and ground shadow, role and TTB labels). --view 2d: top-down with the full TTB, role
+and coordination overlay.
 
     python scripts/watch.py                                  # live window, scripted bots
+    python scripts/watch.py --view 2d                        # top-down overlay
     python scripts/watch.py --policy random
     python scripts/watch.py --save runs/roles.gif --seconds 20
     python scripts/watch.py --no-draw --seconds 600           # role-change stats only
     python scripts/watch.py --blue-mode chaser                # watch a deliberately bad team
     python scripts/watch.py --checkpoint runs/train/<run>/checkpoints/ppo/<run>-<id>/<step id> --save game.mp4 --seconds 180
 
-Labels show role (LOCK when the first man is committed), TTB and height. Marker size grows with
+2D: labels show role (LOCK when the first man is committed), TTB and height. Marker size grows with
 height. Red marks show coordination events: double-commit on the penalized car, nobody challenging
 on the first man, nobody home next to the goal.
 """
@@ -92,6 +95,114 @@ def draw(ax, state, info, t):
     ax.set_title(f"t = {t:6.1f}s{'   KICKOFF' if info['kickoff'] else ''}", fontsize=10)
 
 
+class View3D:
+    """Perspective view of the whole arena with simple shapes: wireframe field, translucent goals, cars as
+    oriented boxes (darker nose face), the ball as a low-poly sphere with its predicted path and a ground
+    shadow. Cars and ball are drawn 2.2x real size so they stay visible at full-field distance."""
+
+    SCALE = 2.2
+    CAR_HALF = np.array([118.0, 84.0, 36.0]) / 2  # Octane hitbox: length, width, height
+    BALL_RADIUS = 92.75
+    CEILING, GOAL_DEPTH, GOAL_HEIGHT = 2044, 880, 642
+    BOX_FACES = ((0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3))
+
+    def __init__(self, fig, elev=28, azim=-62):
+        from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+        self.Poly = Poly3DCollection
+        ax = self.ax = fig.add_subplot(projection="3d")
+        fig.subplots_adjust(0, 0, 1, 1)
+        ax.set_axis_off()
+        ax.set_xlim(-FIELD_X, FIELD_X)
+        ax.set_ylim(-FIELD_Y - self.GOAL_DEPTH, FIELD_Y + self.GOAL_DEPTH)
+        ax.set_zlim(0, self.CEILING)
+        ax.set_box_aspect((2 * FIELD_X, 2 * (FIELD_Y + self.GOAL_DEPTH), self.CEILING), zoom=1.08)
+        ax.view_init(elev=elev, azim=azim)
+        ax.set_proj_type("persp", focal_length=0.5)
+        # Draw in a fixed order (floor, goals, then cars and ball, labels last). matplotlib's own depth sort
+        # uses each shape's average depth, which puts the whole floor in front of anything near midfield.
+        ax.computed_zorder = False
+
+        x, y, z = FIELD_X, FIELD_Y, self.CEILING
+        ax.add_collection3d(Poly3DCollection([[(-x, -y, 0), (x, -y, 0), (x, y, 0), (-x, y, 0)]],
+                                             facecolor="#e4ece0", edgecolor="0.55", lw=1, zorder=0))
+        ax.plot([-x, x], [0, 0], [0, 0], color="0.7", lw=0.8, zorder=1)
+        ax.plot([-x, x, x, -x, -x], [-y, -y, y, y, -y], [z] * 5, color="0.82", lw=0.6, zorder=1)
+        for cx, cy in ((-x, -y), (x, -y), (x, y), (-x, y)):
+            ax.plot([cx, cx], [cy, cy], [0, z], color="0.82", lw=0.6, zorder=1)
+        for team, sign in ((0, -1), (1, 1)):
+            box = self._box((0, sign * (y + self.GOAL_DEPTH / 2), self.GOAL_HEIGHT / 2), np.eye(3),
+                            (self.GOAL_DEPTH / 2, GOAL_HALF_W, self.GOAL_HEIGHT / 2), swap_xy=True)
+            ax.add_collection3d(Poly3DCollection(box, facecolor=COLORS[team], edgecolor=COLORS[team],
+                                                 alpha=0.18, lw=0.8, zorder=1))
+
+        lat, lon = np.linspace(0, np.pi, 7), np.linspace(0, 2 * np.pi, 11)
+        point = lambda a, b: (np.sin(a) * np.cos(b), np.sin(a) * np.sin(b), np.cos(a))
+        self.sphere = np.array([[point(lat[i], lon[j]), point(lat[i + 1], lon[j]), point(lat[i + 1], lon[j + 1]),
+                                 point(lat[i], lon[j + 1])] for i in range(6) for j in range(10)])
+        self.ball = Poly3DCollection([], facecolor="0.3", edgecolor="0.15", lw=0.3, zorder=3)
+        ax.add_collection3d(self.ball)
+        self.ball_label = ax.text(0, 0, 0, "", fontsize=7, color="0.2", zorder=4)
+        self.path, = ax.plot([], [], [], ":", color="0.35", lw=1, zorder=2)
+        self.shadow, = ax.plot([], [], [], "o", color="0.55", ms=4, zorder=2)
+        self.drop, = ax.plot([], [], [], "-", color="0.6", lw=0.7, zorder=2)
+        self.cars, self.labels = {}, {}
+        self.title = ax.text2D(0.02, 0.97, "", transform=ax.transAxes, fontsize=10)
+
+    @staticmethod
+    def _box(center, rot, half, swap_xy=False):
+        """The six faces of a box: half-sizes along rot's columns (forward, right, up)."""
+        h = np.array([half[1], half[0], half[2]]) if swap_xy else np.asarray(half)
+        corners = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]) * h
+        world = np.asarray(center) + corners @ np.asarray(rot).T
+        return [world[list(f)] for f in View3D.BOX_FACES]
+
+    def update(self, state, info, t):
+        ax = self.ax
+        ball = np.asarray(state.ball.position, dtype=float)
+        self.ball.set_verts(list(ball + self.sphere * self.BALL_RADIUS * self.SCALE))
+        self.ball_label.set_position_3d(ball + (0, 0, 260))
+        self.ball_label.set_text(f"z {ball[2]:.0f}")
+        slices = np.asarray(info["ball_slices"])[:, :3]
+        self.path.set_data_3d(slices[:, 0], slices[:, 1], slices[:, 2])
+        self.shadow.set_data_3d([ball[0]], [ball[1]], [0])
+        self.drop.set_data_3d([ball[0], ball[0]], [ball[1], ball[1]], [0, ball[2]])
+
+        roles = info.get("roles", {})
+        for agent, car in state.cars.items():
+            if agent not in self.cars:
+                nose = tuple(0.55 * c for c in matplotlib_rgb(COLORS[car.team_num]))
+                colors = [COLORS[car.team_num]] * 6
+                colors[3] = nose  # +forward face
+                self.cars[agent] = self.Poly([], facecolors=colors, edgecolor="0.1", lw=0.4, zorder=3)
+                ax.add_collection3d(self.cars[agent])
+                self.labels[agent] = ax.text(0, 0, 0, "", fontsize=7, color=COLORS[car.team_num], zorder=4)
+            if car.is_demoed:
+                self.cars[agent].set_verts([])
+                self.labels[agent].set_text("")
+                continue
+            phys = car.physics
+            rot = np.column_stack([phys.forward, phys.right, phys.up])
+            self.cars[agent].set_verts(self._box(phys.position, rot, self.CAR_HALF * self.SCALE))
+            ttb = info["ttb"][agent]
+            role = ("1st" if roles.get(agent) == FIRST else "2nd") if roles else ""
+            self.labels[agent].set_position_3d(np.asarray(phys.position) + (0, 0, 220))
+            self.labels[agent].set_text(f"{role} {ttb:.2f}s" if np.isfinite(ttb) else role)
+
+        match = info.get("match", {})
+        clock = match.get("time_remaining")
+        clock_text = f"{int(clock // 60)}:{int(clock % 60):02d}{' OT' if match.get('overtime') else ''}   " \
+            if clock is not None else ""
+        self.title.set_text(f"{clock_text}score {match.get('score_diff', 0):+d} (blue)   t = {t:5.1f}s"
+                            f"{'   KICKOFF' if info['kickoff'] else ''}")
+
+
+def matplotlib_rgb(name):
+    from matplotlib.colors import to_rgb
+
+    return to_rgb(name)
+
+
 class RoleStats:
     """Counts first-man changes and how long each holder kept the role."""
 
@@ -141,6 +252,8 @@ def main():
     ap.add_argument("--seconds", type=float, default=120)
     ap.add_argument("--save", help="write the video to this file (.gif, or .mp4 through ffmpeg) instead of a window")
     ap.add_argument("--no-draw", action="store_true")
+    ap.add_argument("--view", choices=("3d", "2d"), default="3d",
+                    help="3d: perspective arena view; 2d: top-down with the full coordination overlay")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--blue-mode", choices=MODES, default="normal")
     ap.add_argument("--orange-mode", choices=MODES, default="normal")
@@ -166,7 +279,12 @@ def main():
         if args.save:
             matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        fig, ax = plt.subplots(figsize=(5, 6.5))
+        if args.view == "3d":
+            fig = plt.figure(figsize=(9, 6))
+            view = View3D(fig)
+            ax = view.ax
+        else:
+            fig, ax = plt.subplots(figsize=(5, 6.5))
         if mp4:
             from matplotlib.animation import FFMpegWriter
             writer = FFMpegWriter(fps=round(1 / DT))
@@ -179,7 +297,10 @@ def main():
     while t < args.seconds:
         stats.update(env.state, env.shared_info["roles"], t, reset)
         if ax is not None:
-            draw(ax, env.state, env.shared_info, t)
+            if args.view == "3d":
+                view.update(env.state, env.shared_info, t)
+            else:
+                draw(ax, env.state, env.shared_info, t)
             if writer is not None:
                 writer.grab_frame()
             elif args.save:
