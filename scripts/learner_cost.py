@@ -77,7 +77,7 @@ def load_steps(n_steps, chunk):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--width", type=int, default=128, choices=(128, 256))
+    ap.add_argument("--width", type=int, default=256, choices=(128, 256))
     ap.add_argument("--precision", default="float16", choices=("float16", "float32"))
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--steps", type=int, default=100_000, help="agent-steps per iteration")

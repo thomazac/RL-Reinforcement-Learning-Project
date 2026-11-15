@@ -48,7 +48,7 @@ def main():
     from playstyle.training import CONTROLLER, RunLogger, make_agent_controller, make_config
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--width", type=int, default=128, choices=(128, 256))
+    ap.add_argument("--width", type=int, default=256, choices=(128, 256))
     ap.add_argument("--precision", default="float16", choices=("float16", "float32"))
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--procs", type=int, default=32)

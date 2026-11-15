@@ -39,6 +39,7 @@ from .network import EntityActor, EntityCritic
 
 # Token width -> network settings. Width is fixed for a run and everything trained from it.
 NETWORKS = {128: dict(d_model=128, n_heads=4, d_ff=256), 256: dict(d_model=256, n_heads=4, d_ff=512)}
+WIDTH = 256  # locked for Phase 1a onward: cost 17.6-19.6% of overall throughput against 128, under the 20% line
 CONTROLLER = "ppo"  # the agent controller's name in the run config and checkpoint folders
 MAX_GRAD_NORM = 0.5  # fixed in rlgym-learn-algos 0.2.6, applied to actor and critic separately
 
@@ -272,7 +273,7 @@ def factories(width):
     return actor_factory, critic_factory
 
 
-def make_agent_controller(width=128, precision="float16", reward_ttb="v1", metrics_logger=None):
+def make_agent_controller(width=WIDTH, precision="float16", reward_ttb="v1", metrics_logger=None):
     controller = PPOAgentController(*factories(width), NumpyExperienceBuffer(ClippedGAETrajectoryProcessor()),
                                     metrics_logger=metrics_logger)
     controller.learner = Learner(*factories(width), precision=precision, reward_ttb=reward_ttb)
