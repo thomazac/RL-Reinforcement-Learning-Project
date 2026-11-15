@@ -13,7 +13,8 @@ and the ball move less than 0.1 on the observation's 1/5120 position scale; a re
 
 import os
 
-os.environ["OPENBLAS_NUM_THREADS"] = "1"  # stops numpy in the env processes from competing for cores
+for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+    os.environ[_var] = "1"  # one math thread per process; env processes inherit this before importing numpy
 
 import argparse
 import json
@@ -50,11 +51,11 @@ def main():
     ap.add_argument("--width", type=int, default=128, choices=(128, 256))
     ap.add_argument("--precision", default="float16", choices=("float16", "float32"))
     ap.add_argument("--epochs", type=int, default=1)
-    ap.add_argument("--procs", type=int, default=16)
+    ap.add_argument("--procs", type=int, default=32)
     ap.add_argument("--steps", type=int, default=100_000, help="agent-steps collected per iteration")
     ap.add_argument("--buffer", type=int, default=300_000, help="experience buffer size")
     ap.add_argument("--iterations", type=int, default=3, help="iterations measured after the buffer is full")
-    ap.add_argument("--inference-procs", type=int, help="processes per actor call (default: all)")
+    ap.add_argument("--inference-procs", type=int, help="processes per actor call (default: half)")
     ap.add_argument("--json", help="append the result to this file as one JSON line")
     args = ap.parse_args()
 

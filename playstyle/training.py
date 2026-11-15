@@ -279,7 +279,7 @@ def make_agent_controller(width=128, precision="float16", reward_ttb="v1", metri
     return controller
 
 
-def make_config(n_proc=16, timesteps_per_iteration=100_000, buffer_size=300_000, batch_size=100_000, n_minibatches=2,
+def make_config(n_proc=32, timesteps_per_iteration=100_000, buffer_size=300_000, batch_size=100_000, n_minibatches=2,
                 n_epochs=1, lr=2e-4, ent_coef=0.01, gamma=0.99, timestep_limit=5_000_000_000, device="cuda:0",
                 save_folder="checkpoints", run_name="run", save_every_ts=5_000_000, seed=123, inference_procs=None):
     """Defaults: 100,000 steps per iteration, a 300,000-step buffer, batches of 100,000 as two minibatches of
@@ -287,9 +287,10 @@ def make_config(n_proc=16, timesteps_per_iteration=100_000, buffer_size=300_000,
     doc's 2 epochs would make that 6.) Reuse is a training setting and can change mid-run.
 
     inference_procs: how many env processes must have stepped before the actor runs on their observations.
-    Default: all of them (RLGym-Learn's own default is 45%). Each actor call costs about the same whatever its
-    size, so larger batches mean fewer calls, at the price of processes waiting for the slowest."""
-    process = ProcessConfigModel(n_proc=n_proc, min_process_steps_per_inference=inference_procs or n_proc)
+    Default: half of them, so one half steps while the other is served. Measured 20-30% more collection than
+    waiting for all at 8-20 processes, either width (scripts/throughput.py). Total throughput flattens past
+    about 20 processes; 32 measured best, by a few percent."""
+    process = ProcessConfigModel(n_proc=n_proc, min_process_steps_per_inference=inference_procs or max(1, n_proc // 2))
     return LearningCoordinatorConfigModel(
         base_config=BaseConfigModel(serde_types=serde_types(), timestep_limit=timestep_limit, random_seed=seed),
         process_config=process,
