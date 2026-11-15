@@ -13,10 +13,10 @@ from playstyle import versions
 from playstyle.env import build_env
 from playstyle.network import N_ACTIONS
 from playstyle.obs import OBS_DIM
-from playstyle.training import Learner, factories
+from playstyle.training import (KICKOFF, REWARD_CLIP, SELF_DEMOED, ClippedGAETrajectoryProcessor, Learner, factories,
+                                observation_jumps)
 
 BATCH = 64
-REWARD_CLIP = None  # rlgym-learn-algos 0.2.6 divides rewards by the running return spread and does not clip
 
 
 class FixedBatches:
@@ -150,24 +150,70 @@ def test_truncated_trajectories_bootstrap_from_their_final_observation():
     assert np.allclose(advantages.numpy(), np.concatenate(expected), atol=1e-4)
 
 
-@pytest.mark.parametrize("clip", [None, 10.0])
-def test_reward_scaling(clip):
-    """Which reward clip rlgym-learn-algos applies: the running return spread starts at exactly 1, so rewards
-    of +-50 pass through unscaled, and whether they come out at +-50 or +-10 shows any clip."""
-    processor = GAETrajectoryProcessor()
+def gae_processor(cls, standardize=True):
+    processor = cls()
     processor.load(DerivedTrajectoryProcessorConfig(
-        GAETrajectoryProcessorConfigModel(standardize_returns=True), "test", torch.float32, torch.device("cpu")))
-    n = 30
-    rewards = np.zeros(n)
+        GAETrajectoryProcessorConfigModel(standardize_returns=standardize), "test", torch.float32, torch.device("cpu")))
+    return processor
+
+
+def trajectory(rewards, values, final_value=0.0, truncated=False, obs=None):
+    n = len(rewards)
+    obs = [np.zeros(OBS_DIM, np.float32)] * (n + 1) if obs is None else obs
+    return Trajectory("blue-0", list(obs[:n]), [np.zeros(1, np.int64)] * n, torch.zeros(n), list(rewards),
+                      torch.tensor(values, dtype=torch.float32), obs[n], torch.tensor(final_value), truncated)
+
+
+@pytest.mark.parametrize("cls, clip", [(GAETrajectoryProcessor, None), (ClippedGAETrajectoryProcessor, REWARD_CLIP)])
+def test_reward_clip(cls, clip):
+    """rlgym-learn-algos 0.2.6 does not clip; ours clips at +-10. The running return spread starts at exactly 1,
+    so rewards of +-50 pass through unscaled and come out at +-50 or +-10."""
+    rewards, values = np.zeros(30), np.zeros(30)
     rewards[[5, 20]] = 50.0, -50.0
-    values = np.zeros(n)
-    trajectory = Trajectory("blue-0", [np.zeros(OBS_DIM, np.float32)] * n, [np.zeros(1, np.int64)] * n,
-                            torch.zeros(n), list(rewards), torch.zeros(n), np.zeros(OBS_DIM, np.float32),
-                            torch.tensor(0.0), False)
-    (_, _, _, _, _, advantages), _ = processor.process_trajectories([trajectory])
+    (_, _, _, _, _, advantages), stats = gae_processor(cls).process_trajectories([trajectory(rewards, values)])
     scaled = rewards if clip is None else np.clip(rewards, -clip, clip)
-    matches = np.allclose(advantages.numpy(), hand_gae(scaled, values, 0.0, False), atol=1e-3)
-    assert matches == (clip == REWARD_CLIP)
+    assert np.allclose(advantages.numpy(), hand_gae(scaled, values, 0.0, False), atol=1e-3)
+    if clip is not None:
+        assert stats.reward_clip_share == pytest.approx(2 / 30)
+        assert stats.largest_scaled_reward == pytest.approx(50.0)
+
+
+def test_clipped_processor_matches_rlgym_learn_when_nothing_is_clipped():
+    """Same advantages, returns and running return statistics as 0.2.6's processor, over several iterations
+    (from the second on, rewards are divided by a spread other than 1)."""
+    rng = np.random.default_rng(1)
+    ours, theirs = gae_processor(ClippedGAETrajectoryProcessor), gae_processor(GAETrajectoryProcessor)
+    for _ in range(3):
+        batch = [trajectory(rng.normal(0, 0.3, n), rng.normal(0, 1, n), 0.5, bool(n % 2)) for n in (40, 57, 90)]
+        (*_, a), stats = ours.process_trajectories(batch)
+        (*_, b), data = theirs.process_trajectories(batch)
+        assert np.allclose(a.numpy(), b.numpy(), atol=1e-5)
+        assert stats.reward_clip_share == 0.0
+        assert stats.average_return == pytest.approx(data.average_return)
+        assert np.allclose(ours.return_stats.std, theirs.return_stats.std)
+    assert ours.return_stats.std[0] != 1.0
+
+
+def test_observation_jump_monitor():
+    n = 40
+    obs = np.zeros((n + 1, OBS_DIM), np.float32)
+    obs[:, 0] = np.linspace(0, 1, n + 1)  # the car drives steadily: 0.025 per step
+    obs[:, 124] = np.linspace(0.5, -0.5, n + 1)
+    obs[20:, 124] = 0.0  # a goal: the ball goes back to the centre for a kickoff...
+    obs[20:25, KICKOFF] = 1.0  # ...which the kickoff flag marks
+    obs[30:33, SELF_DEMOED] = 1.0  # demoed, then respawned somewhere else
+    obs[33:, 1] = 0.7
+    assert observation_jumps([trajectory(np.zeros(n), np.zeros(n), obs=list(obs))]) == (pytest.approx(0.025, rel=1e-5), 0)
+
+    broken = obs.copy()
+    broken[10, 125] = 3.0  # a garbage read mid-run
+    broken[12, 50] = np.nan
+    largest, nonfinite = observation_jumps([trajectory(np.zeros(n), np.zeros(n), obs=list(broken))])
+    assert largest == pytest.approx(3.0) and nonfinite == 1
+
+    late = obs.copy()
+    late[n, 2] = 0.9  # the final observation (what a truncated trajectory bootstraps from) is checked too
+    assert observation_jumps([trajectory(np.zeros(n), np.zeros(n), obs=list(late))])[0] == pytest.approx(0.9)
 
 
 def test_checkpoint_records_versions_and_only_loads_matching_observations(tmp_path):

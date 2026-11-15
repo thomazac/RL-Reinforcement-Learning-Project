@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from playstyle.network import (GAME_DIM, N_ACTIONS, OPPONENT, PROFILE_DIM, SELF, TEAMMATE, TOKEN_KINDS, EntityActor,
-                               EntityCritic)
+                               EntityCritic, sample)
 from playstyle.obs import BALL_DIM, CAR_DIM, OBS_DIM
 
 REF = Path(__file__).parent / "fixtures" / "obs_v1_reference.pkl.xz"
@@ -144,6 +144,52 @@ def test_actor_interface(obs, nets):
         assert again.shape == (32, 1) and entropy.dim() == 0
         best, _ = actor.get_action(None, obs[:32], deterministic=True)
         assert np.array_equal(best[:, 0], actor.logits(obs[:32]).argmax(dim=-1).numpy())
+
+
+def test_sampling_follows_the_policy():
+    torch.manual_seed(4)
+    log_probs = torch.log_softmax(torch.randn(1, N_ACTIONS) * 2, dim=-1).expand(200_000, N_ACTIONS)
+    actions, chosen = sample(log_probs)
+    freq = torch.bincount(actions.view(-1), minlength=N_ACTIONS) / len(actions)
+    assert (freq - log_probs[0].exp()).abs().max() < 0.005
+    torch.testing.assert_close(chosen, log_probs.gather(-1, actions).view(-1))
+
+
+def graph_vs_eager(width_kw, obs, sizes):
+    torch.manual_seed(5)
+    graphed = EntityActor(device="cuda", **width_kw)
+    eager = EntityActor(device="cuda", graphs=False, **width_kw)
+    eager.load_state_dict(graphed.state_dict())
+    with torch.no_grad():
+        graphed.net.out.weight *= 100  # sharper policy, so log-probabilities differ between actions
+        eager.net.out.weight *= 100
+    worst = 0.0
+    with torch.no_grad():
+        for n in sizes:
+            actions, log_probs = graphed.get_action(None, [o.numpy() for o in obs[:n]])
+            assert actions.shape == (n, 1) and log_probs.shape == (n,)
+            exact = torch.log_softmax(eager.logits(obs[:n].cuda()), -1).gather(-1, torch.as_tensor(actions).cuda())
+            worst = max(worst, (log_probs - exact.view(-1).cpu()).abs().max().item())
+    return graphed, eager, worst
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a GPU")
+@pytest.mark.parametrize("width_kw", [dict(), dict(d_model=256, d_ff=512)])
+def test_graphed_sampling_matches_eager(obs, width_kw):
+    sizes = (1, 12, 33, 80, 256, 300)  # padded to several graph sizes; 300 is split across two calls
+    graphed, eager, worst = graph_vs_eager(width_kw, obs, sizes)
+    assert worst < 1e-6
+
+    # The graphs are captured by now; an optimizer step changes the weights in place and they must see it.
+    opt = torch.optim.Adam(list(graphed.parameters()), lr=1e-2)
+    loss, _ = graphed.get_backprop_data(None, obs[:64].cuda(), torch.zeros(64, 1, dtype=torch.long, device="cuda"))
+    loss.mean().backward()
+    opt.step()
+    eager.load_state_dict(graphed.state_dict())
+    with torch.no_grad():
+        actions, log_probs = graphed.get_action(None, [o.numpy() for o in obs[:80]])
+        exact = torch.log_softmax(eager.logits(obs[:80].cuda()), -1).gather(-1, torch.as_tensor(actions).cuda())
+    assert (log_probs - exact.view(-1).cpu()).abs().max() < 1e-6
 
 
 def test_every_parameter_gets_a_gradient(obs):

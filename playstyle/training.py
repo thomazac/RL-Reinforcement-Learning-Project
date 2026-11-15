@@ -10,6 +10,7 @@ How RLGym-Learn spends an iteration (read from its source):
     100,000 new steps per iteration, each step is trained on 3 times per epoch.
 """
 
+import json
 import time
 from dataclasses import dataclass
 
@@ -21,12 +22,15 @@ from rlgym_learn_algos.ppo import (
     ExperienceBufferConfigModel,
     GAETrajectoryProcessor,
     GAETrajectoryProcessorConfigModel,
+    GAETrajectoryProcessorData,
     NumpyExperienceBuffer,
     PPOAgentController,
     PPOAgentControllerConfigModel,
     PPOData,
     PPOLearner,
     PPOLearnerConfigModel,
+    PPOMetricsLogger,
+    Trajectory,
 )
 from torch.nn.utils import clip_grad_norm_, parameters_to_vector
 
@@ -50,6 +54,108 @@ def serde_types():
         obs_space_serde_type=space,
         action_space_serde_type=space,
     )
+
+
+REWARD_CLIP = 10.0  # on rewards divided by the running return spread, as in RLGym-PPO
+CLIP_SHARE_WARNING = 0.01
+
+# Observation indices for the jump monitor (playstyle/obs.py): the observer's car and the ball position on the
+# 1/5120 scale, the observer's demoed flag and the kickoff flag.
+SELF_POS, BALL_POS, SELF_DEMOED, KICKOFF = slice(0, 3), slice(124, 127), 28, 185
+JUMP_WARNING = 0.15  # one 8-tick step moves a car or the ball at most about 0.1 on that scale
+
+
+def observation_jumps(trajectories):
+    """Largest one-step position change of the observer's car or the ball within any trajectory (final
+    observation included), and the number of non-finite observation values. Steps that legitimately teleport
+    are left out: into a kickoff after a goal, and while the observer is demoed or respawning. A garbage read
+    from the env processes would show up as a large jump or a non-finite value."""
+    largest, nonfinite = 0.0, 0
+    for t in trajectories:
+        obs = np.stack(t.obs_list + [t.final_obs])
+        nonfinite += int((~np.isfinite(obs)).sum())
+        if len(obs) < 2:
+            continue
+        pos = np.concatenate([obs[:, SELF_POS], obs[:, BALL_POS]], axis=1)
+        jump = np.abs(np.diff(pos, axis=0)).max(axis=1)
+        demoed = obs[:, SELF_DEMOED] > 0.5
+        into_kickoff = (obs[1:, KICKOFF] > 0.5) & (obs[:-1, KICKOFF] < 0.5)
+        keep = ~(demoed[1:] | demoed[:-1] | into_kickoff)
+        if keep.any():
+            largest = max(largest, float(np.nan_to_num(jump[keep], nan=np.inf).max()))
+    return largest, nonfinite
+
+
+@dataclass
+class RunStats(GAETrajectoryProcessorData):
+    reward_clip_share: float = 0.0  # share of steps whose scaled reward hit the clip
+    largest_scaled_reward: float = 0.0  # largest |reward / return spread| before clipping
+    largest_obs_jump: float = 0.0
+    nonfinite_obs: int = 0
+
+
+class ClippedGAETrajectoryProcessor(GAETrajectoryProcessor):
+    """rlgym-learn-algos 0.2.6's GAE with the scaled rewards clipped at +-REWARD_CLIP (0.2.6 divides rewards by
+    the running return spread but does not clip). Returns, and so the return statistics, stay in raw reward
+    units as in 0.2.6. Also reports the observation-jump monitor, since every trajectory passes through here."""
+
+    def process_trajectories(self, trajectories):
+        rust = self.rust_gae_trajectory_processor
+        spread = float(self.return_stats.std[0]) if self.standardize_returns else 1.0
+        ids, obs, actions, log_probs, values, _, returns, avg_reward, avg_return = \
+            rust.process_trajectories(trajectories, spread)
+        scaled = [np.asarray(t.reward_list, dtype=np.float64) / spread for t in trajectories]
+        clipped = [Trajectory(t.agent_id, t.obs_list, t.action_list, t.log_probs,
+                              np.clip(s, -REWARD_CLIP, REWARD_CLIP).tolist(), t.val_preds, t.final_obs,
+                              t.final_val_pred, t.truncated) for t, s in zip(trajectories, scaled)]
+        advantages = rust.process_trajectories(clipped, 1.0)[5]
+        if self.standardize_returns:
+            for sample in returns[:min(self.max_returns_per_stats_increment, len(returns))]:
+                self.return_stats.update(sample)
+
+        all_scaled = np.concatenate(scaled) if scaled else np.zeros(1)
+        largest_jump, nonfinite = observation_jumps(trajectories)
+        stats = RunStats(average_reward=avg_reward, average_undiscounted_episodic_return=avg_return,
+                         average_return=returns.mean(), return_standard_deviation=returns.std(),
+                         reward_clip_share=float((np.abs(all_scaled) > REWARD_CLIP).mean()),
+                         largest_scaled_reward=float(np.abs(all_scaled).max()),
+                         largest_obs_jump=largest_jump, nonfinite_obs=nonfinite)
+        return ((ids, obs, actions, log_probs.to(device=self.device), values.to(device=self.device),
+                 torch.from_numpy(advantages).to(device=self.device)), stats)
+
+
+class RunLogger(PPOMetricsLogger):
+    """RLGym-Learn's PPO metrics plus this project's monitors, printed each iteration and appended as one JSON
+    line per iteration to `path` (if given). Prints a warning when a monitor crosses its threshold."""
+
+    def __init__(self, path=None):
+        super().__init__()
+        self.path = path
+        self.warnings = []
+
+    def collect_agent_metrics(self, data):
+        super().collect_agent_metrics(data)
+        tp, ppo = data.trajectory_processor_data, data.ppo_data
+        self.agent_metrics["Monitors"] = {
+            "Reward Clip Share": tp.reward_clip_share,
+            "Largest Scaled Reward": tp.largest_scaled_reward,
+            "Largest Observation Jump": tp.largest_obs_jump,
+            "Non-finite Observation Values": tp.nonfinite_obs,
+            "First Minibatch Ratio": ppo.first_minibatch_ratio,
+        }
+        self.warnings = []
+        if tp.reward_clip_share > CLIP_SHARE_WARNING:
+            self.warnings.append(f"{tp.reward_clip_share:.1%} of scaled rewards hit the +-{REWARD_CLIP:g} clip")
+        if tp.largest_obs_jump > JUMP_WARNING or tp.nonfinite_obs:
+            self.warnings.append(f"observation jump {tp.largest_obs_jump:.3f}, {tp.nonfinite_obs} non-finite values")
+
+    def report_metrics(self):
+        super().report_metrics()
+        for w in self.warnings:
+            print(f"WARNING: {w}")
+        if self.path is not None:
+            with open(self.path, "a") as f:
+                f.write(json.dumps({**self.get_metrics(), "Warnings": self.warnings}, default=float) + "\n")
 
 
 @dataclass
@@ -167,7 +273,7 @@ def factories(width):
 
 
 def make_agent_controller(width=128, precision="float16", reward_ttb="v1", metrics_logger=None):
-    controller = PPOAgentController(*factories(width), NumpyExperienceBuffer(GAETrajectoryProcessor()),
+    controller = PPOAgentController(*factories(width), NumpyExperienceBuffer(ClippedGAETrajectoryProcessor()),
                                     metrics_logger=metrics_logger)
     controller.learner = Learner(*factories(width), precision=precision, reward_ttb=reward_ttb)
     return controller
@@ -180,11 +286,10 @@ def make_config(n_proc=16, timesteps_per_iteration=100_000, buffer_size=300_000,
     50,000, 1 epoch. Every epoch covers the whole buffer, so each step is trained on 3 times. (The design
     doc's 2 epochs would make that 6.) Reuse is a training setting and can change mid-run.
 
-    inference_procs: how many env processes must have stepped before the actor runs on their observations
-    (RLGym-Learn's default is 45% of them). Each actor call costs about the same whatever its size, so larger
-    batches mean fewer calls, at the price of processes waiting for the rest."""
-    process = ProcessConfigModel(n_proc=n_proc) if inference_procs is None else \
-        ProcessConfigModel(n_proc=n_proc, min_process_steps_per_inference=inference_procs)
+    inference_procs: how many env processes must have stepped before the actor runs on their observations.
+    Default: all of them (RLGym-Learn's own default is 45%). Each actor call costs about the same whatever its
+    size, so larger batches mean fewer calls, at the price of processes waiting for the slowest."""
+    process = ProcessConfigModel(n_proc=n_proc, min_process_steps_per_inference=inference_procs or n_proc)
     return LearningCoordinatorConfigModel(
         base_config=BaseConfigModel(serde_types=serde_types(), timestep_limit=timestep_limit, random_seed=seed),
         process_config=process,

@@ -129,22 +129,83 @@ def _as_tensor(obs_list, device):
     return torch.as_tensor(np.asarray(obs_list), dtype=torch.float32, device=device)
 
 
+def sample(log_probs):
+    """One action per row, drawn from the categorical distribution (Gumbel-max), with its log-probability.
+    Uses only fixed-shape operations, so it can run inside a CUDA graph."""
+    noise = -torch.log(-torch.log(torch.rand_like(log_probs).clamp_(1e-20, 1.0 - 1e-7)))
+    action = (log_probs + noise).argmax(dim=-1, keepdim=True)
+    return action, log_probs.gather(-1, action).squeeze(-1)
+
+
+class GraphedSampler:
+    """Collection-time sampling through CUDA graphs. At this network size each GPU call costs about the same
+    whatever its batch size (kernel launches dominate), so each batch is padded to the next fixed size and
+    replayed as one captured graph. The graphs read the actor's weights in place, so they stay valid as the
+    optimizer updates them. Only actions and log-probabilities come back to the CPU, through pinned memory."""
+
+    SIZES = (16, 32, 48, 64, 96, 128, 192, 256)
+
+    def __init__(self, actor):
+        self.actor = actor
+        self.pool = torch.cuda.graph_pool_handle()
+        self.graphs = {}
+        self.obs_in = torch.empty((self.SIZES[-1], OBS_DIM), dtype=torch.float32, pin_memory=True)
+        self.actions_out = torch.empty((self.SIZES[-1], 1), dtype=torch.int64, pin_memory=True)
+        self.log_probs_out = torch.empty(self.SIZES[-1], dtype=torch.float32, pin_memory=True)
+
+    def _forward(self, obs):
+        return sample(F.log_softmax(self.actor.logits(obs), dim=-1))
+
+    def _capture(self, size):
+        obs = torch.zeros((size, OBS_DIM), device=self.actor.device)
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.no_grad(), torch.cuda.stream(side):
+            for _ in range(3):
+                self._forward(obs)
+        torch.cuda.current_stream().wait_stream(side)
+        graph = torch.cuda.CUDAGraph()
+        with torch.no_grad(), torch.cuda.graph(graph, pool=self.pool):
+            action, log_prob = self._forward(obs)
+        return graph, obs, action, log_prob
+
+    def __call__(self, obs_list):
+        n = len(obs_list)
+        if n > self.SIZES[-1]:
+            parts = [self(obs_list[i:i + self.SIZES[-1]]) for i in range(0, n, self.SIZES[-1])]
+            return np.concatenate([a for a, _ in parts]), torch.cat([lp for _, lp in parts])
+        size = next(s for s in self.SIZES if s >= n)
+        if size not in self.graphs:
+            self.graphs[size] = self._capture(size)
+        graph, obs, action, log_prob = self.graphs[size]
+        np.stack(obs_list, out=self.obs_in.numpy()[:n])
+        obs[:n].copy_(self.obs_in[:n], non_blocking=True)
+        graph.replay()
+        self.actions_out[:n].copy_(action[:n], non_blocking=True)
+        self.log_probs_out[:n].copy_(log_prob[:n], non_blocking=True)
+        torch.cuda.current_stream().synchronize()
+        return self.actions_out[:n].numpy().copy(), self.log_probs_out[:n].clone()
+
+
 class EntityActor(Actor):
-    def __init__(self, device="cpu", **net):
+    def __init__(self, device="cpu", graphs=True, **net):
         super().__init__()
         self.device = torch.device(device)
         self.net = EntityNet(N_ACTIONS, final_gain=0.01, **net).to(self.device)
+        self.sampler = GraphedSampler(self) if graphs and self.device.type == "cuda" else None
 
     def logits(self, obs_list):
         return self.net(_as_tensor(obs_list, self.device))
 
     def get_action(self, agent_id_list, obs_list, **kwargs):
+        if self.sampler is not None and not kwargs.get("deterministic"):
+            return self.sampler(obs_list)
         log_probs = F.log_softmax(self.logits(obs_list), dim=-1)
         if kwargs.get("deterministic"):
             action = log_probs.argmax(dim=-1, keepdim=True)
             return action.cpu().numpy(), torch.zeros(len(action))
-        action = torch.multinomial(log_probs.exp(), 1, True)
-        return action.cpu().numpy(), log_probs.gather(-1, action).squeeze(-1).to(device="cpu", non_blocking=True)
+        action, log_prob = sample(log_probs)
+        return action.cpu().numpy(), log_prob.cpu()
 
     def get_backprop_data(self, agent_id_list, obs_list, action_list, **kwargs):
         log_probs = F.log_softmax(self.logits(obs_list), dim=-1)

@@ -44,7 +44,7 @@ def main():
     from rlgym_learn import LearningCoordinator
 
     from playstyle.env import build_env
-    from playstyle.training import CONTROLLER, make_agent_controller, make_config
+    from playstyle.training import CONTROLLER, RunLogger, make_agent_controller, make_config
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--width", type=int, default=128, choices=(128, 256))
@@ -54,7 +54,7 @@ def main():
     ap.add_argument("--steps", type=int, default=100_000, help="agent-steps collected per iteration")
     ap.add_argument("--buffer", type=int, default=300_000, help="experience buffer size")
     ap.add_argument("--iterations", type=int, default=3, help="iterations measured after the buffer is full")
-    ap.add_argument("--inference-procs", type=int, help="processes per actor call (RLGym-Learn default: 45%%)")
+    ap.add_argument("--inference-procs", type=int, help="processes per actor call (default: all)")
     ap.add_argument("--json", help="append the result to this file as one JSON line")
     args = ap.parse_args()
 
@@ -63,7 +63,15 @@ def main():
     spent = defaultdict(float)  # seconds per part of the main loop, for the iteration in progress
     rows, jumps, ratios = [], [], []
 
-    controller = make_agent_controller(width=args.width, precision=args.precision)
+    monitors = []
+
+    class Logger(RunLogger):  # the run's monitors, kept quiet: only warnings print
+        def report_metrics(self):
+            monitors.append(self.agent_metrics["Monitors"])
+            for w in self.warnings:
+                print(f"WARNING: {w}", flush=True)
+
+    controller = make_agent_controller(width=args.width, precision=args.precision, metrics_logger=Logger())
     config = make_config(n_proc=args.procs, timesteps_per_iteration=args.steps, buffer_size=args.buffer,
                          batch_size=args.steps, n_minibatches=max(1, args.steps // 50_000), n_epochs=args.epochs,
                          timestep_limit=n_iterations * args.steps + args.steps // 2,
@@ -162,6 +170,9 @@ def main():
     print(f"  final observations: {result['trajectories']} trajectories, {result['final_obs_jumps_over_limit']} jump more "
           f"than {JUMP_LIMIT} (largest {result['largest_final_obs_jump']:.3f})")
     print(f"  peak GPU memory {result['gpu_gb']:.1f} GB")
+    worst = {k: max(m[k] for m in monitors) for k in monitors[0]}
+    print("  monitors, worst over all iterations: " + ", ".join(f"{k} {v:.4g}" for k, v in worst.items()))
+    result["monitors_worst"] = worst
     print(f"  env processes at the end: {sum(c is None for c in exit_codes)} running, exited: "
           f"{[c for c in exit_codes if c is not None]}")
     result["env_process_exit_codes"] = exit_codes
