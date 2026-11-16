@@ -228,14 +228,22 @@ class RoleStats:
 
 
 def load_policy(checkpoint, device):
-    """The actor from a training checkpoint folder (the one holding ppo_learner/). Network width is read from
-    the saved weights; the checkpoint must have been trained on the current observation versions."""
+    """The actor from a training checkpoint folder (the one holding ppo_learner/), or from a run folder holding
+    numbered checkpoint folders, in which case the newest is used. Network width is read from the saved weights;
+    the checkpoint must have been trained on the current observation versions."""
     import torch
 
     from playstyle import versions
     from playstyle.network import EntityActor
 
-    learner = Path(checkpoint) / "ppo_learner"
+    checkpoint = Path(checkpoint)
+    if not (checkpoint / "ppo_learner").exists():
+        numbered = [p for p in checkpoint.iterdir() if p.name.isdigit() and (p / "ppo_learner").exists()]
+        if not numbered:
+            raise SystemExit(f"{checkpoint} holds neither ppo_learner/ nor numbered checkpoint folders")
+        checkpoint = max(numbered, key=lambda p: int(p.name))
+        print(f"using newest checkpoint {checkpoint.name}")
+    learner = checkpoint / "ppo_learner"
     versions.check(learner)
     state = torch.load(learner / "actor.pt", map_location=device)
     d_model, d_ff = state["net.trunk.kind"].shape[1], state["net.trunk.blocks.0.ff.0.weight"].shape[0]
