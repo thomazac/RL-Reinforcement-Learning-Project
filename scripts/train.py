@@ -99,14 +99,20 @@ def main():
     ap.add_argument("--procs", type=int, default=32)
     ap.add_argument("--width", type=int, default=256, choices=(128, 256))
     ap.add_argument("--precision", default="float16", choices=("float16", "float32"))
-    ap.add_argument("--lr", type=float, default=2e-4)
+    ap.add_argument("--phase", default="1a", choices=("1a", "1b"),
+                    help="1b: Phase 1b reward (playstyle.rewards.PHASE_1B), coordination on, mixed start states")
+    ap.add_argument("--lr", type=float, help="default 2e-4 in Phase 1a, 1e-4 in 1b")
     ap.add_argument("--gamma", type=float, default=0.99)
     ap.add_argument("--ent-coef", type=float, default=0.01)
-    ap.add_argument("--team-spirit", type=float, default=0.0)
+    ap.add_argument("--team-spirit", type=float, help="default 0 in Phase 1a, 0.2 in 1b")
     ap.add_argument("--opponent-scale", type=float, default=1.0)
     ap.add_argument("--save-every", type=int, default=5_000_000)
     ap.add_argument("--seed", type=int, default=123)
     args = ap.parse_args()
+    if args.lr is None:
+        args.lr = 2e-4 if args.phase == "1a" else 1e-4
+    if args.team_spirit is None:
+        args.team_spirit = 0.0 if args.phase == "1a" else 0.2
 
     import numpy as np
     import rlgym_learn
@@ -118,7 +124,8 @@ def main():
     from playstyle.env import build_env
     from playstyle.network import N_ACTIONS
     from playstyle.obs import OBS_DIM
-    from playstyle.rewards import PHASE_1A
+    from playstyle.rewards import PHASE_1A, PHASE_1B
+    from playstyle.states import START_WEIGHTS
     from playstyle.training import CONTROLLER, NETWORKS, RunLogger, make_agent_controller, make_config
 
     run_dir = ROOT / "runs" / "train" / args.run
@@ -131,14 +138,15 @@ def main():
     if done >= stop:
         raise SystemExit(f"{done:,} steps already done, nothing to do before {stop:,}")
 
-    weights = dict(PHASE_1A)
+    weights = dict(PHASE_1A if args.phase == "1a" else PHASE_1B)
     env_fn = functools.partial(build_env, weights=weights, team_spirit=args.team_spirit,
-                               opponent_scale=args.opponent_scale)
+                               opponent_scale=args.opponent_scale, phase=args.phase)
     if args.init_from and resume:
         raise SystemExit("--init-from starts a new run; use --resume to carry on an existing one")
     controller = make_agent_controller(width=args.width, precision=args.precision,
                                        metrics_logger=RunLogger(path=run_dir / "log.jsonl", weights=weights),
-                                       overlap=not args.no_overlap, init_from=args.init_from)
+                                       overlap=not args.no_overlap, init_from=args.init_from,
+                                       component_names=tuple(weights))
     config = make_config(n_proc=args.procs, lr=args.lr, gamma=args.gamma, ent_coef=args.ent_coef,
                          timestep_limit=stop - done,  # the coordinator counts from 0 on every start
                          save_folder=str(run_dir / "checkpoints"), run_name=args.run,
@@ -149,8 +157,9 @@ def main():
     record = {
         "started": time.strftime("%Y-%m-%d %H:%M:%S"), "args": vars(args), "steps_done_at_start": done,
         "resume_from": str(resume) if resume else None, "init_from": args.init_from,
-        "reward": {"weights": weights, "team_spirit": args.team_spirit, "opponent_scale": args.opponent_scale,
-                   "coordination": False, "reward_ttb": "v1"},
+        "reward": {"phase": args.phase, "weights": weights, "team_spirit": args.team_spirit,
+                   "opponent_scale": args.opponent_scale, "coordination": args.phase == "1b", "reward_ttb": "v1"},
+        "start_states": START_WEIGHTS if args.phase == "1b" else "kickoff",
         "network": {"width": args.width, **NETWORKS[args.width], "obs_dim": OBS_DIM, "actions": N_ACTIONS},
         "versions": {"obs": versions.OBS_VERSIONS, "reward": versions.reward_versions("v1")},
         "git": git_state(),

@@ -44,7 +44,7 @@ from . import versions
 from .ball_prediction import TICK_RATE
 from .env import TICK_SKIP
 from .network import EntityActor, EntityCritic
-from .rewards import PHASE_1A
+from .rewards import BALL_MAX_SPEED, PHASE_1A
 
 STEPS_PER_SECOND = TICK_RATE / TICK_SKIP  # agent decisions per second of game time
 
@@ -109,6 +109,8 @@ class RunStats(GAETrajectoryProcessorData):
     largest_obs_jump: float = 0.0
     nonfinite_obs: int = 0
     component_means: dict = field(default_factory=dict)  # raw reward component -> mean per agent-step
+    component_fire_rates: dict = field(default_factory=dict)  # raw reward component -> share of agent-steps non-zero
+    component_medians: dict = field(default_factory=dict)  # raw reward component -> median of its non-zero values
 
 
 class ClippedGAETrajectoryProcessor(GAETrajectoryProcessor):
@@ -145,13 +147,20 @@ class ClippedGAETrajectoryProcessor(GAETrajectoryProcessor):
 
         all_scaled = np.concatenate(scaled) if scaled else np.zeros(1)
         largest_jump, nonfinite = observation_jumps(trajectories)
-        means = np.concatenate(parts).mean(axis=0) if parts else []
+        raw = np.concatenate(parts) if parts else np.zeros((0, len(self.component_names)))
+        fired = raw != 0
+        medians = {n: float(np.median(raw[fired[:, i], i])) if fired[:, i].any() else 0.0
+                   for i, n in enumerate(self.component_names)}
         stats = RunStats(average_reward=avg_reward, average_undiscounted_episodic_return=avg_return,
                          average_return=returns.mean(), return_standard_deviation=returns.std(),
                          reward_clip_share=float((np.abs(all_scaled) > REWARD_CLIP).mean()),
                          largest_scaled_reward=float(np.abs(all_scaled).max()),
                          largest_obs_jump=largest_jump, nonfinite_obs=nonfinite,
-                         component_means={n: float(m) for n, m in zip(self.component_names, means)})
+                         component_means={n: float(m) for n, m in zip(self.component_names, raw.mean(axis=0))}
+                         if len(raw) else {},
+                         component_fire_rates={n: float(m) for n, m in zip(self.component_names, fired.mean(axis=0))}
+                         if len(raw) else {},
+                         component_medians=medians)
         return ((ids, obs, actions, log_probs.to(device=self.device), values.to(device=self.device),
                  torch.from_numpy(advantages).to(device=self.device)), stats)
 
@@ -177,6 +186,33 @@ def resources():
             "GPU Reserved GB": torch.cuda.memory_reserved() / 2**30 if torch.cuda.is_available() else 0.0}
 
 
+STEPS_PER_5_MIN = 300 * STEPS_PER_SECOND  # per car: 5 minutes of play, the unit of every per-match number below
+
+
+def phase_1b_metrics(tp, weights):
+    """Per 5 minutes of play (comparable across runs and with human replays): each term's weighted total per car,
+    event counts, and how much of the time each coordination failure is on."""
+    means, rates, medians = tp.component_means, tp.component_fire_rates, tp.component_medians
+    per5 = {f"{n} (weighted)": means[n] * weights.get(n, 0.0) * STEPS_PER_5_MIN for n in means}
+    events = {
+        "Goals (both teams)": 2 * rates["goal"] * STEPS_PER_5_MIN,  # each goal fires for both scorers: 2 of 4 cars
+        "Shots per Player": rates["shot"] * STEPS_PER_5_MIN,
+        "Saves per Player": rates["save"] * STEPS_PER_5_MIN,
+        "Clears per Player": rates["clear"] * STEPS_PER_5_MIN,
+        "Air Touches per Player": rates["air_touch"] * STEPS_PER_5_MIN,
+        "Touches per Player": rates["touch"] * STEPS_PER_5_MIN,
+    }
+    play = {
+        "Touches per Player per Minute": rates["touch"] * STEPS_PER_SECOND * 60,  # distinct touches (human GC1: 9.3)
+        "Median Hit Strength (uu/s)": medians["touch"] * BALL_MAX_SPEED,  # human GC1: 1,309
+        # Shares of time per team. Double-commit and nobody-challenging are charged to one car of the pair.
+        "Double-Commit Share": 2 * rates["double_commit"],
+        "Nobody Challenging Share": 2 * rates["nobody_challenging"],
+        "Empty Net Share": rates["nobody_home"],
+    }
+    return {"Per 5 Minutes (weighted, per car)": per5, "Per 5 Minutes (events)": events, "Play": play}
+
+
 class RunLogger(PPOMetricsLogger):
     """RLGym-Learn's PPO metrics plus this project's: per-component reward means (raw and weighted), touches
     per minute, the monitors and memory. Printed each iteration and appended as one JSON line per iteration to
@@ -197,7 +233,9 @@ class RunLogger(PPOMetricsLogger):
             **{f"{n} (raw mean)": m for n, m in means.items()},
             **{f"{n} (weighted mean)": m * self.weights.get(n, 0.0) for n, m in means.items()},
         }
-        if "touch" in means:  # touches per car per minute of game time
+        if "goal" in means:  # Phase 1b
+            self.agent_metrics.update(phase_1b_metrics(tp, self.weights))
+        elif "touch" in means:  # touches per car per minute of game time
             self.agent_metrics["Reward Components"]["Touches per Minute"] = means["touch"] * STEPS_PER_SECOND * 60
         self.agent_metrics["Resources"] = resources()
         self.agent_metrics["Monitors"] = {

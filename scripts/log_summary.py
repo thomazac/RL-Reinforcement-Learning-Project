@@ -24,6 +24,18 @@ def main():
         ppo, rc, mon, res, timing = (r["PPO Metrics"], r["Reward Components"], r["Monitors"], r["Resources"],
                                      r["Timing"])
         weighted = "  ".join(f"{k.split(' ')[0]} {v:+.3f}" for k, v in rc.items() if "weighted" in k)
+        if "Play" in r:  # Phase 1b
+            play, ev = r["Play"], r["Per 5 Minutes (events)"]
+            print(f"{r['Timestep Collection']['Cumulative Timesteps'] / 1e6:6.1f}M"
+                  f"{' FROZEN' if mon.get('Actor Frozen') else ''}  touches/min {play['Touches per Player per Minute']:5.2f}  "
+                  f"hit {play['Median Hit Strength (uu/s)']:5.0f}  per 5 min: goals {ev['Goals (both teams)']:4.2f} "
+                  f"shots {ev['Shots per Player']:4.2f} saves {ev['Saves per Player']:4.2f}  "
+                  f"double-commit {play['Double-Commit Share']:.2%}  empty net {play['Empty Net Share']:.1%}  "
+                  f"KL {ppo['Mean KL Divergence']:.4f}  ratio {mon['First Minibatch Ratio']:.4f}  "
+                  f"clip {mon['Reward Clip Share']:.2%} (max {mon['Largest Scaled Reward']:.1f})  "
+                  f"entropy {ppo['Actor Entropy']:.3f}  critic {ppo['Critic Loss']:.3f}  "
+                  f"sps {timing['Overall Steps per Second']:6,.0f}" + (f"  WARN {r['Warnings']}" if r.get("Warnings") else ""))
+            continue
         print(f"{r['Timestep Collection']['Cumulative Timesteps'] / 1e6:6.1f}M  touches/min {rc.get('Touches per Minute', 0):5.2f}  "
               f"entropy {ppo['Actor Entropy']:.3f}  critic loss {ppo['Critic Loss']:.4f}  KL {ppo['Mean KL Divergence']:.5f}  "
               f"ratio {mon['First Minibatch Ratio']:.4f}  clip {mon['Reward Clip Share']:.2%} "

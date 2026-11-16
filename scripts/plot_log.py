@@ -28,8 +28,10 @@ def main():
     rows = [r for r in rows if "Timing" in r and r["Timing"]["Overall Steps per Second"] > 1000]  # drop resume-timer artefacts
     steps = np.array([r["Timestep Collection"]["Cumulative Timesteps"] for r in rows]) / 1e6
     get = lambda *keys: np.array([float(_dig(r, keys)) for r in rows])
+    touches = get("Play", "Touches per Player per Minute") if "Play" in rows[0] else \
+        get("Reward Components", "Touches per Minute")
     panels = [
-        ("Touches per car per minute", get("Reward Components", "Touches per Minute")),
+        ("Touches per car per minute", touches),
         ("Actor entropy", get("PPO Metrics", "Actor Entropy")),
         ("Critic loss", get("PPO Metrics", "Critic Loss")),
         ("Overall agent-steps/s", get("Timing", "Overall Steps per Second")),

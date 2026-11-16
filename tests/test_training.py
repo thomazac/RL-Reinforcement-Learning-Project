@@ -97,6 +97,25 @@ def test_minibatch_split_and_sync_leave_the_gradient_unchanged(device):
             f"{name}: max difference {(whole[name] - chunked[name]).abs().max():.2e}"
 
 
+def test_phase_1b_metrics_are_per_5_minutes_of_play():
+    """One env-step = 4 agent-steps. Over 4,500 env-steps (5 minutes): 3 goals fire for 2 scorers each; a team has a
+    double-commit (charged to one car) on 450 steps; a team's net is empty (both cars flagged) on 900 steps."""
+    from playstyle.rewards import PHASE_1B
+    from playstyle.training import RunStats, phase_1b_metrics
+    agent_steps = 4 * 4500
+    rates = {n: 0.0 for n in PHASE_1B}
+    rates.update(goal=3 * 2 / agent_steps, double_commit=450 / agent_steps, nobody_home=900 * 2 / agent_steps,
+                 touch=4 * 45 / agent_steps)
+    stats = RunStats(0.0, 0.0, 0.0, 0.0, component_means={n: 0.0 for n in PHASE_1B}, component_fire_rates=rates,
+                     component_medians={**{n: 0.0 for n in PHASE_1B}, "touch": 0.2})
+    m = phase_1b_metrics(stats, PHASE_1B)
+    assert m["Per 5 Minutes (events)"]["Goals (both teams)"] == pytest.approx(3)
+    assert m["Play"]["Double-Commit Share"] == pytest.approx(450 / 4500 / 2)  # one team's 450 steps, over two teams
+    assert m["Play"]["Empty Net Share"] == pytest.approx(900 / 4500 / 2)
+    assert m["Play"]["Touches per Player per Minute"] == pytest.approx(9)
+    assert m["Play"]["Median Hit Strength (uu/s)"] == pytest.approx(1200)
+
+
 def test_critic_warmup_trains_only_the_critic():
     learner = loaded(Learner(*factories(128), precision="float32"))
     learner.frozen_updates = 1
