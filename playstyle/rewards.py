@@ -11,6 +11,7 @@ import numpy as np
 from rlgym.api import RewardFunction
 
 from .ball_prediction import SLICE_TIMES, TICK_RATE
+from .roles import FIRST
 
 CAR_MAX_SPEED = 2300.0
 
@@ -84,7 +85,7 @@ PHASE_1B_TERMS = {
     "clear": ONE_SIDED,  # 1: paid touch in the defensive third that sends the ball out within CLEAR_HORIZON
     "shot": ONE_SIDED,  # 1: touch that puts the ball on course for the opponent net (logged; weight 0 to start)
     "boost": ONE_SIDED,  # gain in sqrt(boost / 100): a pickup pays more the emptier the tank
-    "speed_to_ball": ONE_SIDED,  # as in Phase 1a
+    "speed_to_ball": ONE_SIDED,  # as in Phase 1a, but only for the current first man (it would pay a second man to double-commit)
     "double_commit": ONE_SIDED,  # 1 per step charged to this car (playstyle/coordination.py), plus revoked steps
     "nobody_challenging": ONE_SIDED,  # 1 per step charged to this car (the first man)
     "nobody_home": ONE_SIDED,  # 1 per step for both teammates while their net is empty
@@ -93,13 +94,14 @@ PHASE_1B_TERMS = {
     "ball_to_goal": ZERO_SUM,  # (ball velocity toward the opponent net - toward the own net) / (2 BALL_MAX_SPEED)
     "win": ZERO_SUM,  # +1 / -1 on the step the match ends
 }
-# Sized with scripts/size_rewards.py on the Phase 1a 500M policy (per agent per 5-minute match, a goal = 10):
+# Sized with scripts/size_rewards.py on the Phase 1a 500M policy (per agent per 5 minutes of play, a goal = 10):
 # shaping terms at most ~1/3 goal each, coordination ~1/10 goal each. touch is sized for the human rate and
 # strength (47 touches at 1,309 uu/s -> 3.1), above today's farmed 84 weak touches (2.3). save and air_touch
-# barely occur yet (0.04 and 4.6 per match), so they are set per event (1.5 per save, 0.5 for a mid-height air
-# touch) rather than from frequency, which would give 48 per save.
+# barely occur yet (0.04 and 4.6 per 5 minutes), so they are set per event (1.5 per save, 0.5 for a mid-height air
+# touch) rather than from frequency, which would give 48 per save. speed_to_ball was measured with every car earning
+# it; only the first man does now, so its weight is doubled to keep its total near 1.0.
 PHASE_1B = {"touch": 0.3, "air_touch": 1.0, "save": 1.5, "clear": 1.0, "shot": 0.0, "boost": 0.15,
-            "speed_to_ball": 0.0007, "double_commit": -0.04, "nobody_challenging": -0.2, "nobody_home": -0.0017,
+            "speed_to_ball": 0.0014, "double_commit": -0.04, "nobody_challenging": -0.2, "nobody_home": -0.0017,
             "goal": 10.0, "concede": -8.0, "ball_to_goal": 0.0055, "win": 10.0}
 
 
@@ -167,12 +169,13 @@ class Phase1bReward(RewardFunction):
         field_reset = self.field_reset_next
         match = shared_info.get("match", {})
         coordination = shared_info.get("coordination", {})
+        roles = shared_info.get("roles", {})
 
         for a in agents:
             car, r = state.cars[a], raw[a]
             team = car.team_num
             touching = car.ball_touches > 0
-            if not car.is_demoed:
+            if not car.is_demoed and roles.get(a) == FIRST:
                 r[idx["speed_to_ball"]] = components(car, state.ball)[1]
             if touching and not field_reset:
                 new_contact = not self.in_contact[a]

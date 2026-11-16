@@ -149,6 +149,17 @@ def test_boost_pays_sqrt_gains_but_not_refills(rig):
     assert rig.step()["blue-0"]["boost"] == 0
 
 
+def test_speed_to_ball_pays_only_the_first_man(rig):
+    for a in ("blue-0", "blue-1"):
+        car = rig.state.cars[a]
+        to_ball = rig.state.ball.position - car.physics.position
+        car.physics.linear_velocity = (1000 * to_ball / np.linalg.norm(to_ball)).astype(np.float32)
+    rig.info["roles"] = {"blue-0": "first", "blue-1": "second", "orange-0": "first", "orange-1": "second"}
+    r = rig.step()
+    assert r["blue-0"]["speed_to_ball"] == pytest.approx(1000 / 2300, rel=1e-3)
+    assert r["blue-1"]["speed_to_ball"] == 0
+
+
 def test_coordination_events_charge_the_right_cars(rig):
     rig.info["coordination"][0] = {**NO_EVENTS, "double_commit": "blue-1", "revoked": {"blue-1": 3},
                                    "nobody_challenging": "blue-0", "nobody_home": True}

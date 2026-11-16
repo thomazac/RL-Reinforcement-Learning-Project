@@ -1,9 +1,10 @@
 """Size Phase 1b reward weights from how often each term fires: play a checkpoint in the Phase 1b env, total
-each raw component per agent per 5-minute match, and pick the weight that gives the target per-match total.
+each raw component per agent per 5 minutes of play (4,500 steps; sampled matches are shorter, since their clocks
+start between 1 s and 5 min), and pick the weight that gives the target total.
 
     python scripts/size_rewards.py --checkpoint <folder> [--minutes 30]
 
-Targets (per agent per match; a goal is 10): outcome terms are fixed (goal +10, concede -8, win/loss +-10); each
+Targets (per agent per 5 minutes of play; a goal is 10): outcome terms are fixed (goal +10, concede -8, win/loss +-10); each
 shaping term at most about a third of a goal; coordination penalties about a tenth of a goal. ball_to_goal is
 zero-sum and averages zero, so it is sized on its mean absolute value.
 """
@@ -55,7 +56,7 @@ def main():
             obs = env.reset()
 
     per_match = STEPS_PER_MATCH / (steps * len(agents))
-    print(f"{args.minutes:.0f} sim-minutes; per agent per 5-minute match:")
+    print(f"{args.minutes:.0f} sim-minutes; per agent per 5 minutes of play:")
     print(f"  {'term':20s} {'raw total':>10s} {'mean |raw|':>10s} {'fires':>8s} {'weight':>9s} {'weighted total':>14s}")
     weights = {}
     for i, n in enumerate(names):
