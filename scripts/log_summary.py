@@ -6,6 +6,22 @@ whether a run is healthy.
 
 import argparse
 import json
+from pathlib import Path
+
+
+def iterations(lines):
+    """Iteration rows in order, without those a resume superseded: a stopped run may have logged past its last
+    checkpoint, and the resumed run logs those steps again."""
+    rows = []
+    for r in lines:
+        if "resume_check" in r:
+            state = Path(r["resume_check"]["from"]) / "resume_state.json"
+            if state.exists():
+                resumed_at = json.loads(state.read_text())["cumulative_timesteps"]
+                rows = [x for x in rows if x["Timestep Collection"]["Cumulative Timesteps"] <= resumed_at]
+        elif "PPO Metrics" in r:
+            rows.append(r)
+    return rows
 
 
 def main():
@@ -17,7 +33,7 @@ def main():
     for line in rows:
         if "resume_check" in line:
             print(f"resume check: {line['resume_check']['differences'] or 'passed'}")
-    rows = [r for r in rows if "PPO Metrics" in r]
+    rows = iterations(rows)
     for i, r in enumerate(rows):
         if i % args.every and i != len(rows) - 1:
             continue

@@ -5,7 +5,11 @@
 
 import argparse
 import json
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from log_summary import iterations
 
 import matplotlib
 
@@ -24,8 +28,8 @@ def main():
     ap.add_argument("--out")
     args = ap.parse_args()
 
-    rows = [json.loads(line) for line in Path(args.log).read_text().splitlines() if line.strip()]
-    rows = [r for r in rows if "Timing" in r and r["Timing"]["Overall Steps per Second"] > 1000]  # drop resume-timer artefacts
+    rows = iterations(json.loads(line) for line in Path(args.log).read_text().splitlines() if line.strip())
+    rows = [r for r in rows if r["Timing"]["Overall Steps per Second"] > 1000]  # drop resume-timer artefacts
     steps = np.array([r["Timestep Collection"]["Cumulative Timesteps"] for r in rows]) / 1e6
     get = lambda *keys: np.array([float(_dig(r, keys)) for r in rows])
     touches = get("Play", "Touches per Player per Minute") if "Play" in rows[0] else \
