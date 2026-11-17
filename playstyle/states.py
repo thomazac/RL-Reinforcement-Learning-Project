@@ -7,7 +7,10 @@ their jump, double jump and flip used up (the conservative choice: no free flip)
 """
 
 import numpy as np
-from rlgym.api import StateMutator
+from rlgym.api import DoneCondition, StateMutator
+
+from .ball_prediction import TICK_RATE
+from .rewards import SHOT_HORIZON, enters_net
 
 FIELD_X, FIELD_Y, CEILING = 4096.0, 5120.0, 2044.0
 CORNER = 8064.0  # the 45-degree corner walls: |x| + |y| = CORNER
@@ -25,8 +28,12 @@ CAR_GAP = 2 * float(np.linalg.norm(HITBOX_HALF)) + 5  # hitbox centers at least 
 CONTACT_GAP = 5.0  # uu of clearance between the ball and any hitbox
 MAX_CAR_SPIN = 5.5  # rad/s
 
-START_WEIGHTS = {"kickoff": 0.25, "replay": 0.35, "random": 0.15, "coord_equidistant": 0.075, "coord_counter": 0.075,
-                 "defend_shot": 0.10}
+# Shares of episode starts. defend_shot episodes are short practice (PracticeEnd), so their 35% of episodes is only
+# about 3% of steps: a whole-match episode runs ~1,500 steps, a practice one at most PRACTICE_SECONDS (90 steps).
+# At 10% with whole-match episodes they gave each player under one practice shot per hour of play.
+START_WEIGHTS = {"kickoff": 0.18, "replay": 0.25, "random": 0.11, "coord_equidistant": 0.055, "coord_counter": 0.055,
+                 "defend_shot": 0.35}
+PRACTICE_SECONDS = 6.0
 GRAVITY = 650.0  # uu/s^2
 
 
@@ -248,6 +255,26 @@ GENERATORS = {"random": random_state, "coord_equidistant": coord_equidistant, "c
 def state_is_valid(ball, cars):
     return valid_state(np.asarray(ball["pos"], dtype=np.float64), np.array([c["pos"] for c in cars], dtype=np.float64),
                        np.array([c["rot"] for c in cars], dtype=np.float64))
+
+
+class PracticeEnd(DoneCondition):
+    """Truncation for defend_shot episodes, which are save practice rather than matches: they end once the play
+    resolves (a goal, or a defender touched the ball and it is no longer on course for the net) or after
+    PRACTICE_SECONDS. Truncated, not terminated, so the value bootstraps and nothing learns that a game ends there.
+    Other starts are whole matches and never end here."""
+
+    def reset(self, agents, initial_state, shared_info):
+        self.active = shared_info.get("start") == "defend_shot"
+        self.start_tick = initial_state.tick_count
+        self.defending = 0 if initial_state.ball.linear_velocity[1] < 0 else 1
+
+    def is_done(self, agents, state, shared_info):
+        done = False
+        if self.active:
+            done = (state.tick_count - self.start_tick) / TICK_RATE >= PRACTICE_SECONDS or bool(state.goal_scored)
+            touched = any(c.ball_touches > 0 for c in state.cars.values() if c.team_num == self.defending)
+            done |= touched and not enters_net(np.asarray(shared_info["ball_slices"]), self.defending, SHOT_HORIZON)
+        return {a: done for a in agents}
 
 
 class MixedStart(StateMutator):

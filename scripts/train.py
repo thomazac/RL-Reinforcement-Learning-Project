@@ -21,6 +21,7 @@ import argparse
 import functools
 import json
 import platform
+import shutil
 import subprocess
 import sys
 import time
@@ -107,6 +108,8 @@ def main():
     ap.add_argument("--team-spirit", type=float, help="default 0 in Phase 1a, 0.4 in 1b (the first 500M ran at 0.2)")
     ap.add_argument("--opponent-scale", type=float, default=1.0)
     ap.add_argument("--save-every", type=int, default=5_000_000)
+    ap.add_argument("--keep-every", type=int, default=100_000_000,
+                    help="also copy the first checkpoint past every multiple of this to runs/train/<run>/kept/")
     ap.add_argument("--seed", type=int, default=123)
     args = ap.parse_args()
     if args.lr is None:
@@ -174,12 +177,19 @@ def main():
     print(f"settings written to {run_dir / name}")
 
     save = controller.save_checkpoint
+    kept = {"mark": done // args.keep_every}
 
     def save_with_state():
         save()
         newest = max(Path(controller.checkpoints_save_folder).iterdir(), key=lambda p: int(p.name))
         (newest / RESUME_STATE).write_text(json.dumps(state_summary(controller), indent=2))
         print(f"checkpoint {newest} at {controller.cumulative_timesteps:,} steps")
+        mark = controller.cumulative_timesteps // args.keep_every
+        if mark > kept["mark"]:  # the rotating checkpoints keep only the newest few; keep one per mark for evals
+            kept["mark"] = mark
+            target = run_dir / "kept" / f"{mark * args.keep_every // 1_000_000}M"
+            shutil.copytree(newest, target, dirs_exist_ok=True)
+            print(f"kept a copy at {target}")
 
     controller.save_checkpoint = save_with_state
     coordinator = LearningCoordinator(env_fn, {CONTROLLER: controller}, config)

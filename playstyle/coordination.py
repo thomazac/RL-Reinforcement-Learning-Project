@@ -8,8 +8,10 @@ import numpy as np
 from .ball_prediction import SLICE_TIMES
 from .roles import FIRST, SECOND, is_kickoff
 
-DOUBLE_COMMIT_TTB = 0.6  # both teammates below this TTB...
-CLOSING_SPEED = 500.0  # ...and both closing on the ball faster than this (uu/s)
+# Loosened from 0.6 s / 500 uu/s after 900M Phase 1b steps left crowding well above human (1.60 cars within 1,000 uu
+# of the ball against 1.04; all four 7.8% of the time against 0.3%) while double-commits stayed rare (0.8%).
+DOUBLE_COMMIT_TTB = 0.8  # both teammates below this TTB...
+CLOSING_SPEED = 300.0  # ...and both closing on the ball faster than this (uu/s)
 OWN_NET_HORIZON = 1.0  # double-commit is allowed if the ball is predicted into the own net this soon (s)
 # Demo play excuses a double-commit when a teammate is aimed at an opponent rather than the ball:
 # either it has recently aimed at opponents more than at its ball intercept, or it is aimed tightly

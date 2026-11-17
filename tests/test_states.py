@@ -132,6 +132,30 @@ def test_defend_shot_states_are_shots_on_target_with_a_keeper_back():
     assert on_target / valid > 0.8
 
 
+def test_practice_episodes_end_when_the_play_resolves():
+    from types import SimpleNamespace as NS
+
+    from playstyle.states import PRACTICE_SECONDS, PracticeEnd
+
+    def game(tick, vel_y=-2000, goal=False, touches=(0, 0, 0, 0)):
+        cars = {a: NS(team_num=t, ball_touches=n) for a, t, n in zip(("b0", "b1", "o0", "o1"), (0, 0, 1, 1), touches)}
+        return NS(tick_count=tick, goal_scored=goal, cars=cars, ball=NS(linear_velocity=np.array([0.0, vel_y, 0.0])))
+
+    into_blue_net = {"ball_slices": np.tile([0.0, -5300.0, 300.0], (31, 1)), "start": "defend_shot"}
+    away = {"ball_slices": np.tile([0.0, -2000.0, 300.0], (31, 1)), "start": "defend_shot"}
+    agents = ["b0", "b1", "o0", "o1"]
+    end = PracticeEnd()
+    end.reset(agents, game(0), into_blue_net)
+    assert not any(end.is_done(agents, game(8), into_blue_net).values())
+    assert all(end.is_done(agents, game(int(PRACTICE_SECONDS * 120)), into_blue_net).values())
+    assert all(end.is_done(agents, game(8, goal=True), into_blue_net).values())
+    assert all(end.is_done(agents, game(8, touches=(1, 0, 0, 0)), away).values())  # blue touched it off course
+    assert not any(end.is_done(agents, game(8, touches=(1, 0, 0, 0)), into_blue_net).values())  # touched, still going in
+    assert not any(end.is_done(agents, game(8, touches=(0, 0, 1, 0)), away).values())  # only the attacker touched it
+    end.reset(agents, game(0), {**into_blue_net, "start": "replay"})  # whole-match episodes never end here
+    assert not any(end.is_done(agents, game(10_000, goal=True), into_blue_net).values())
+
+
 def test_apply_state_sets_conservative_jump_state():
     env = make_env(seed=0)
     env.reset()
