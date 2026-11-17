@@ -25,7 +25,9 @@ CAR_GAP = 2 * float(np.linalg.norm(HITBOX_HALF)) + 5  # hitbox centers at least 
 CONTACT_GAP = 5.0  # uu of clearance between the ball and any hitbox
 MAX_CAR_SPIN = 5.5  # rad/s
 
-START_WEIGHTS = {"kickoff": 0.25, "replay": 0.45, "random": 0.15, "coord_equidistant": 0.075, "coord_counter": 0.075}
+START_WEIGHTS = {"kickoff": 0.25, "replay": 0.35, "random": 0.15, "coord_equidistant": 0.075, "coord_counter": 0.075,
+                 "defend_shot": 0.10}
+GRAVITY = 650.0  # uu/s^2
 
 
 def surfaces(pos):
@@ -215,7 +217,32 @@ def coord_counter(rng):
     return mirror(ball, cars) if rng.random() < 0.5 else (ball, cars)
 
 
-GENERATORS = {"random": random_state, "coord_equidistant": coord_equidistant, "coord_counter": coord_counter}
+def defend_shot(rng):
+    """A shot already on its way into one team's net: the ball on a ballistic path into the goal mouth, arriving in
+    0.8-2 s. One defender near the net facing the ball, the other rotating back from upfield; the shooter just behind
+    the ball, the other attacker upfield. Bots can only learn saves by facing shots."""
+    pos = np.array([rng.uniform(-2500, 2500), rng.uniform(-4200, -1500), rng.uniform(BALL_RADIUS, 400)])
+    target = np.array([rng.uniform(-700, 700), -FIELD_Y - 200, rng.uniform(150, 550)])  # blue (team 0) defends -y
+    flight = rng.uniform(0.8, 2.0)
+    vel = (target - pos) / flight
+    vel[2] += 0.5 * GRAVITY * flight
+    ball = {"pos": pos, "vel": vel, "ang_vel": np.zeros(3)}
+    keeper_pos = (rng.uniform(-800, 800), rng.uniform(-5000, -4300))
+    keeper = ground_car(keeper_pos, _facing(keeper_pos, pos), rng.uniform(0, 500), rng.uniform(0, 100))
+    back_pos = (rng.uniform(-3500, 3500), pos[1] + rng.uniform(-500, 2500))
+    back = ground_car(back_pos, -np.pi / 2 + rng.uniform(-0.6, 0.6), rng.uniform(500, 1500), rng.uniform(0, 100))
+    heading = vel[:2] / np.linalg.norm(vel[:2])
+    shooter_pos = pos[:2] - rng.uniform(250, 450) * heading
+    shooter = ground_car(shooter_pos, float(np.arctan2(heading[1], heading[0])), rng.uniform(1000, 1800),
+                         rng.uniform(0, 100))
+    support_pos = (rng.uniform(-3000, 3000), pos[1] + rng.uniform(1000, 3500))
+    support = ground_car(support_pos, -np.pi / 2 + rng.uniform(-0.8, 0.8), rng.uniform(500, 1500), rng.uniform(0, 100))
+    cars = [keeper, back, shooter, support]
+    return mirror(ball, cars) if rng.random() < 0.5 else (ball, cars)
+
+
+GENERATORS = {"random": random_state, "coord_equidistant": coord_equidistant, "coord_counter": coord_counter,
+              "defend_shot": defend_shot}
 
 
 def state_is_valid(ball, cars):

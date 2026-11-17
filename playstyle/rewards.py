@@ -100,7 +100,10 @@ PHASE_1B_TERMS = {
 # barely occur yet (0.04 and 4.6 per 5 minutes), so they are set per event (1.5 per save, 0.5 for a mid-height air
 # touch) rather than from frequency, which would give 48 per save. speed_to_ball was measured with every car earning
 # it; only the first man does now, so its weight is doubled to keep its total near 1.0.
-PHASE_1B = {"touch": 0.3, "air_touch": 1.0, "save": 1.5, "clear": 1.0, "shot": 0.0, "boost": 0.15,
+# After 500M steps saves were still 0.1-0.2 per player per 5 minutes against 1.28 for GC1 humans (same definition),
+# so save went from 1.5 to 3, still well under the concede penalty so letting a shot through never pays; most of the
+# extra saves are meant to come from the defend_shot start states (playstyle/states.py), not the weight.
+PHASE_1B = {"touch": 0.3, "air_touch": 1.0, "save": 3.0, "clear": 1.0, "shot": 0.0, "boost": 0.15,
             "speed_to_ball": 0.0014, "double_commit": -0.04, "nobody_challenging": -0.2, "nobody_home": -0.0017,
             "goal": 10.0, "concede": -8.0, "ball_to_goal": 0.0055, "win": 10.0}
 

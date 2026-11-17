@@ -119,6 +119,27 @@ def test_nobody_challenging_after_opponent_keeps_possession():
     assert update(tracker, state(cars, ball), ttb, still(ball))[0]["nobody_challenging"] is None
 
 
+def test_shadowing_defender_counts_as_pressure():
+    """An opponent dribbles at blue's net. A blue defender goal-side and retreating with the ball is shadowing, not
+    absent; one that stands still while the ball comes at him, or sits off the line, is not."""
+    ball = (0, -1000, 93)
+
+    def run(b0_pos, b0_vel, ball_vel=(0, -1000, 0)):
+        cars = {"b0": car(0, b0_pos, b0_vel), "b1": car(0, (3500, 3000, 17)),
+                "o0": car(1, (0, -900, 17), (0, -1000, 0), touches=1), "o1": car(1, (0, 2000, 17))}
+        s = state(cars, ball)
+        s.ball.linear_velocity = np.array(ball_vel, float)
+        tracker, ttb = CoordinationTracker(), dict.fromkeys(cars, 2.0)
+        update(tracker, s, ttb, still(ball))
+        cars["o0"].ball_touches = 0
+        return update(tracker, s, ttb, still(ball), n=int(NOBODY_CHALLENGING_TIME / DT) + 2)[0]["nobody_challenging"]
+
+    assert run((0, -2500, 17), (0, -900, 0)) is None  # goal-side, 1,500 uu off, retreating with the ball
+    assert run((0, -2500, 17), (0, 0, 0)) == "b0"  # standing still while the ball approaches at 1,000 uu/s
+    assert run((2000, -2500, 17), (0, -900, 0)) == "b0"  # retreating, but 2,000 uu off the ball-to-goal line
+    assert run((0, -2500, 17), (0, 0, 0), ball_vel=(0, 0, 0)) is None  # holding position against a stopped dribble
+
+
 def test_possession_resets_at_kickoff():
     ball = (0, -1000, 93)
     cars = {"b0": car(0, (0, -4800, 17)), "b1": car(0, (300, -4900, 17)),

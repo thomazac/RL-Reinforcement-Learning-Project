@@ -104,7 +104,7 @@ def main():
     ap.add_argument("--lr", type=float, help="default 2e-4 in Phase 1a, 1e-4 in 1b")
     ap.add_argument("--gamma", type=float, default=0.99)
     ap.add_argument("--ent-coef", type=float, default=0.01)
-    ap.add_argument("--team-spirit", type=float, help="default 0 in Phase 1a, 0.2 in 1b")
+    ap.add_argument("--team-spirit", type=float, help="default 0 in Phase 1a, 0.4 in 1b (the first 500M ran at 0.2)")
     ap.add_argument("--opponent-scale", type=float, default=1.0)
     ap.add_argument("--save-every", type=int, default=5_000_000)
     ap.add_argument("--seed", type=int, default=123)
@@ -112,7 +112,7 @@ def main():
     if args.lr is None:
         args.lr = 2e-4 if args.phase == "1a" else 1e-4
     if args.team_spirit is None:
-        args.team_spirit = 0.0 if args.phase == "1a" else 0.2
+        args.team_spirit = 0.0 if args.phase == "1a" else 0.4
 
     import numpy as np
     import rlgym_learn

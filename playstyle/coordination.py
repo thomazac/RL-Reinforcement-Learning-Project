@@ -25,6 +25,12 @@ DEMO_EXCUSE_WINDOW = 0.5
 POSSESSION_DIST = 300.0  # ball within this of the last toucher counts as controlled possession
 NOBODY_CHALLENGING_TIME = 1.5  # s of opponent possession before "nobody challenging" fires
 CHALLENGE_SPEED = 300.0  # a teammate closing faster than this counts as challenging
+# Shadowing also counts as pressure: a teammate goal-side of the ball, near the line from the ball to its own net,
+# within this distance band of the ball, and retreating at least about as fast as the ball comes toward the net.
+# Without it the penalty charges a defender for holding position and pushes him into early challenges.
+SHADOW_DISTANCE = (300.0, 3000.0)
+SHADOW_LATERAL = 900.0  # uu from the ball-to-goal line
+SHADOW_PACE_SLACK = 400.0  # uu/s the defender may retreat slower than the ball approaches
 GOAL_Y, GOAL_HALF_W, GOAL_H = 5120.0, 893.0, 642.0
 OWN_THIRD_Y = GOAL_Y / 3
 
@@ -39,6 +45,25 @@ def _closing(car, target) -> float:
 
 def _own_goal_sign(team) -> float:
     return -1.0 if team == 0 else 1.0
+
+
+def _shadowing(car, ball, ball_vel, team) -> bool:
+    """Goal-side of the ball, near its line to the own net, in the distance band, keeping pace with it."""
+    if car.is_demoed:
+        return False
+    goal = np.array([0.0, _own_goal_sign(team) * GOAL_Y, 0.0])
+    pos = car.physics.position
+    to_goal = goal[:2] - ball[:2]
+    length = float(np.linalg.norm(to_goal))
+    direction = to_goal / max(length, 1e-6)
+    along = float((pos[:2] - ball[:2]) @ direction)  # how far toward the own net from the ball
+    lateral = abs(float(np.cross(direction, pos[:2] - ball[:2])))
+    distance = float(np.linalg.norm(pos - ball))
+    if not (0 < along < length and lateral < SHADOW_LATERAL and SHADOW_DISTANCE[0] <= distance <= SHADOW_DISTANCE[1]):
+        return False
+    approach = float(np.asarray(ball_vel)[:2] @ direction)  # ball speed toward the own net
+    retreat = float(car.physics.linear_velocity[:2] @ direction)
+    return approach <= 0 or retreat >= approach - SHADOW_PACE_SLACK
 
 
 class CoordinationTracker:
@@ -108,7 +133,8 @@ class CoordinationTracker:
 
             if controlled and holder.team_num != team and self.possession_time > NOBODY_CHALLENGING_TIME \
                     and first is not None \
-                    and not any(_closing(state.cars[a], ball) > CHALLENGE_SPEED for a in ids):
+                    and not any(_closing(state.cars[a], ball) > CHALLENGE_SPEED
+                                or _shadowing(state.cars[a], ball, state.ball.linear_velocity, team) for a in ids):
                 ev["nobody_challenging"] = first
 
             sign = _own_goal_sign(team)

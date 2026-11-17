@@ -37,9 +37,9 @@ def rotations(euler):
     return rx @ ry @ rz
 
 
-def usable_frames(time, ball_pos, ball_vel, cars_pos):
-    """Mask of moments outside kickoff countdowns, the PRE_GOAL seconds before goals and goal-to-kickoff gaps,
-    with no demoed car."""
+def usable_frames(time, ball_pos, ball_vel, cars_pos, pre_goal=PRE_GOAL):
+    """Mask of moments outside kickoff countdowns, the pre_goal seconds before goals and goal-to-kickoff gaps,
+    with no demoed car. pre_goal=0 gives all live play."""
     kickoff = (np.linalg.norm(ball_pos[:, :2], axis=1) < 10) & (np.linalg.norm(ball_vel, axis=1) < 1)
     in_goal = np.abs(ball_pos[:, 1]) > FIELD_Y + BALL_RADIUS
     keep = np.zeros(len(time), dtype=bool)
@@ -49,7 +49,7 @@ def usable_frames(time, ball_pos, ball_vel, cars_pos):
             live, start = True, i
             continue
         if live and in_goal[i]:  # goal: drop the run-up, then wait for the next kickoff
-            keep[(time >= time[i] - PRE_GOAL) & (time <= time[i])] = False
+            keep[(time >= time[i] - pre_goal) & (time <= time[i])] = False
             live = False
             continue
         keep[i] = live

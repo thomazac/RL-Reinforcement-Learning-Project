@@ -11,7 +11,8 @@ from extract_replay_states import PRE_GOAL, rotations, usable_frames
 from playstyle.env import REPLAY_STATES, TICK_SKIP, build_env, make_env
 from playstyle.match import TICK_RATE
 from playstyle.states import (BALL_RADIUS, FIELD_X, START_WEIGHTS, MixedStart, ReplayStates, apply_state,
-                              coord_counter, coord_equidistant, ground_car, mirror, random_state, state_is_valid,
+                              coord_counter, coord_equidistant, defend_shot, ground_car, mirror, random_state,
+                              state_is_valid,
                               yaw_matrix)
 
 needs_replays = pytest.mark.skipif(not REPLAY_STATES.exists(), reason="run scripts/extract_replay_states.py first")
@@ -110,6 +111,25 @@ def test_generated_states_are_mostly_valid_and_set_up_their_situations():
         sign = -1 if ball["vel"][1] < 0 else 1  # the ball heads for the defending team's net
         defenders = (0, 1) if sign < 0 else (2, 3)
         assert all(cars[i]["pos"][1] * sign < -1000 for i in defenders)  # both caught upfield
+
+
+def test_defend_shot_states_are_shots_on_target_with_a_keeper_back():
+    from playstyle.ball_prediction import BallPredictor
+    from playstyle.rewards import SHOT_HORIZON, enters_net
+    rng, predictor = np.random.default_rng(2), BallPredictor()
+    valid = on_target = 0
+    for _ in range(300):
+        ball, cars = defend_shot(rng)
+        if not state_is_valid(ball, cars):
+            continue
+        valid += 1
+        defending = 0 if ball["vel"][1] < 0 else 1
+        keeper = cars[0] if defending == 0 else cars[2]
+        goal = np.array([0.0, (-1 if defending == 0 else 1) * 5120.0])
+        assert np.linalg.norm(keeper["pos"][:2] - goal) < 1500
+        on_target += enters_net(predictor.predict(ball["pos"], ball["vel"], ball["ang_vel"]), defending, SHOT_HORIZON)
+    assert valid > 100
+    assert on_target / valid > 0.8
 
 
 def test_apply_state_sets_conservative_jump_state():
