@@ -127,6 +127,16 @@ PHASE_1B = {"touch": 0.3, "air_touch": 1.0, "save": 3.0, "clear": 1.0, "shot": 0
             "rotation": 0.002, "shot_path": 0.036, "shot_touch": 1.0,
             "practice_shot": 0.0, "practice_defended": 0.0, "practice_level": 0.0, "both_near": 0.0,
             "goal": 10.0, "concede": -8.0, "ball_to_goal": 0.0055, "win": 10.0}
+# The core shaping layer, annealed in Phase 1c (scaled_core) so the outcome terms dominate. Saves, the coordination
+# layer and the rotation reward are not annealed.
+CORE_TERMS = ("touch", "air_touch", "speed_to_ball", "boost", "clear", "shot_path")
+
+
+def scaled_core(weights, scale):
+    """weights with every CORE_TERMS weight multiplied by scale."""
+    return {n: w * scale if n in CORE_TERMS else w for n, w in weights.items()}
+
+
 NEAR_BALL = 1000.0  # uu, for both_near (human GC1 baseline: scripts/human_baselines.py)
 ROTATION_ARRIVED = 600.0  # uu from the rotation spot counts as in it
 

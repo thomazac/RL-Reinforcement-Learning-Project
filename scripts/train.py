@@ -107,6 +107,9 @@ def main():
     ap.add_argument("--ent-coef", type=float, default=0.01)
     ap.add_argument("--team-spirit", type=float, help="default 0 in Phase 1a, 0.4 in 1b (the first 500M ran at 0.2)")
     ap.add_argument("--opponent-scale", type=float, default=1.0)
+    ap.add_argument("--core-scale", type=float, default=1.0,
+                    help="Phase 1b reward: multiplies the core shaping weights (playstyle.rewards.CORE_TERMS); "
+                         "Phase 1c anneals it")
     ap.add_argument("--save-every", type=int, default=5_000_000)
     ap.add_argument("--keep-every", type=int, default=100_000_000,
                     help="also copy the first checkpoint past every multiple of this to runs/train/<run>/kept/")
@@ -127,7 +130,7 @@ def main():
     from playstyle.env import build_env
     from playstyle.network import N_ACTIONS
     from playstyle.obs import OBS_DIM
-    from playstyle.rewards import PHASE_1A, PHASE_1B
+    from playstyle.rewards import PHASE_1A, PHASE_1B, scaled_core
     from playstyle.states import START_WEIGHTS
     from playstyle.training import CONTROLLER, NETWORKS, RunLogger, make_agent_controller, make_config
 
@@ -141,7 +144,7 @@ def main():
     if done >= stop:
         raise SystemExit(f"{done:,} steps already done, nothing to do before {stop:,}")
 
-    weights = dict(PHASE_1A if args.phase == "1a" else PHASE_1B)
+    weights = dict(PHASE_1A) if args.phase == "1a" else scaled_core(PHASE_1B, args.core_scale)
     env_fn = functools.partial(build_env, weights=weights, team_spirit=args.team_spirit,
                                opponent_scale=args.opponent_scale, phase=args.phase)
     if args.init_from and resume:
@@ -160,7 +163,7 @@ def main():
     record = {
         "started": time.strftime("%Y-%m-%d %H:%M:%S"), "args": vars(args), "steps_done_at_start": done,
         "resume_from": str(resume) if resume else None, "init_from": args.init_from,
-        "reward": {"phase": args.phase, "weights": weights, "team_spirit": args.team_spirit,
+        "reward": {"phase": args.phase, "core_scale": args.core_scale, "weights": weights, "team_spirit": args.team_spirit,
                    "opponent_scale": args.opponent_scale, "coordination": args.phase == "1b", "reward_ttb": "v1"},
         "start_states": START_WEIGHTS if args.phase == "1b" else "kickoff",
         "network": {"width": args.width, **NETWORKS[args.width], "obs_dim": OBS_DIM, "actions": N_ACTIONS},

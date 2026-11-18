@@ -14,6 +14,7 @@ ball in the first second, whether it jumped, whether it touched the ball.
 """
 
 import argparse
+import json
 import sys
 from collections import Counter
 from pathlib import Path
@@ -43,6 +44,7 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--level", type=float, default=1.0,
                     help="shot difficulty (playstyle.states.defend_shot); 1 is the full range, as in earlier evals")
+    ap.add_argument("--json", help="append the results to this file as one JSON line")
     args = ap.parse_args()
 
     actor = load_policy(args.checkpoint, "cuda" if torch.cuda.is_available() else "cpu")
@@ -140,6 +142,14 @@ def main():
         print(f"failed reachable shots ({failed.sum()}): keeper moved toward the ball {fk[:, 2].mean():.0%}, toward the "
               f"shot's goal-line crossing point {path.mean():.0%}, jumped {fk[:, 3].mean():.0%}, touched {fk[:, 4].mean():.0%}, "
               f"closest approach median {np.median(fk[:, 1]):.0f} uu")
+    if args.json:
+        result = {"eval": "shots", "checkpoint": str(args.checkpoint), "level": args.level, "shots": n,
+                  **{f"outcome_{k}": v / n for k, v in outcomes.items()},
+                  "keeper_moved_toward_ball": float(ks[:, 2].mean()), "keeper_jumped": float(ks[:, 3].mean()),
+                  "keeper_touched": float(ks[:, 4].mean()),
+                  "keeper_toward_crossing_point": float(np.mean(toward_path)) if toward_path else 0.0}
+        with open(args.json, "a") as f:
+            f.write(json.dumps(result) + "\n")
     for name in ("goal", "save", "defended"):
         rows = [r for r in keeper_stats if r[6] == name]
         if rows:

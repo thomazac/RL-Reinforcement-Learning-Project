@@ -13,6 +13,7 @@ recomputes and what a recompute costs.
 
 import argparse
 import glob
+import json
 import sys
 import time
 from pathlib import Path
@@ -158,7 +159,11 @@ def bots(checkpoint, minutes, seed):
     print(f"  ball prediction cache            recompute on {len(miss) / n:.1%} of steps; "
           f"hit {np.median(hit) * 1e6:.0f} us, recompute {np.median(miss) * 1e6:.0f} us (medians); "
           f"recompute share of predict time {miss.sum() / (hit.sum() + miss.sum()):.0%}")
-    return distinct / 4 / sim_min
+    return {"touches_per_min": distinct / 4 / sim_min, "median_hit": float(np.median(changes)),
+            "cars_near_ball": float(np.mean(near_counts)), "all_four_near": all_near / steps,
+            "goals_per_5min": goals / sim_min * 5, "saves_per_player_5min": rate["save"] * per5,
+            "shots_per_player_5min": rate["shot"] * per5, "double_commit_share": 2 * rate["double_commit"],
+            "empty_net_share": rate["nobody_home"], "both_near_share": rate["both_near"], "sim_minutes": sim_min}
 
 
 def main():
@@ -167,11 +172,15 @@ def main():
     ap.add_argument("--minutes", type=float, default=30)
     ap.add_argument("--replays", default="data/replays/*.replay")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--json", help="append the bot results to this file as one JSON line")
     args = ap.parse_args()
     h = human(args.replays)
     print()
     b = bots(args.checkpoint, args.minutes, args.seed)
-    print(f"\nBot distinct touches are {b / h:.1f}x the human rate")
+    print(f"\nBot distinct touches are {b['touches_per_min'] / h:.1f}x the human rate")
+    if args.json:
+        with open(args.json, "a") as f:
+            f.write(json.dumps({"eval": "clean", "checkpoint": str(args.checkpoint), **b}) + "\n")
 
 
 if __name__ == "__main__":
