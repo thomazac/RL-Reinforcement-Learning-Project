@@ -113,6 +113,9 @@ def main():
     ap.add_argument("--save-every", type=int, default=5_000_000)
     ap.add_argument("--keep-every", type=int, default=100_000_000,
                     help="also copy the first checkpoint past every multiple of this to runs/train/<run>/kept/")
+    ap.add_argument("--video-every", type=int, default=50_000_000,
+                    help="record one full match (scripts/watch.py --full-game) from the first checkpoint past every "
+                         "multiple of this, in the background, to runs/train/<run>/games/; 0 turns it off")
     ap.add_argument("--seed", type=int, default=123)
     args = ap.parse_args()
     if args.lr is None:
@@ -180,7 +183,18 @@ def main():
     print(f"settings written to {run_dir / name}")
 
     save = controller.save_checkpoint
-    kept = {"mark": done // args.keep_every}
+    kept = {"mark": done // args.keep_every, "video": done // args.video_every if args.video_every else None}
+
+    def record_game(checkpoint, steps):
+        """A full match from this checkpoint, rendered by a separate process so training does not wait for it."""
+        games = run_dir / "games"
+        games.mkdir(exist_ok=True)
+        name = games / f"game_{steps // 1_000_000}M"
+        with open(name.with_suffix(".log"), "w") as out:
+            subprocess.Popen([sys.executable, str(ROOT / "scripts" / "watch.py"), "--checkpoint", str(checkpoint),
+                              "--full-game", "--save", str(name.with_suffix(".mp4"))],
+                             cwd=ROOT, stdout=out, stderr=subprocess.STDOUT)
+        print(f"recording a full game to {name.with_suffix('.mp4')}")
 
     def save_with_state():
         save()
@@ -193,6 +207,9 @@ def main():
             target = run_dir / "kept" / f"{mark * args.keep_every // 1_000_000}M"
             shutil.copytree(newest, target, dirs_exist_ok=True)
             print(f"kept a copy at {target}")
+        if args.video_every and controller.cumulative_timesteps // args.video_every > kept["video"]:
+            kept["video"] = controller.cumulative_timesteps // args.video_every
+            record_game(newest, controller.cumulative_timesteps)
 
     controller.save_checkpoint = save_with_state
     coordinator = LearningCoordinator(env_fn, {CONTROLLER: controller}, config)

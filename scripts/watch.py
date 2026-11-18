@@ -26,10 +26,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from playstyle.ball_prediction import TICK_RATE
 from playstyle.env import TICK_SKIP, build_env, make_env
+from playstyle.match import new_match
 from playstyle.roles import FIRST, MIN_HOLD
 from playstyle.scripted import MODES, RoleBot
 
 FIELD_X, FIELD_Y, GOAL_HALF_W = 4096, 5120, 893
+FULL_GAME_CAP = 900.0  # s of play: a full match is 5 minutes plus kickoffs and overtime
 COLORS = ("tab:blue", "tab:orange")
 DT = TICK_SKIP / TICK_RATE
 
@@ -258,6 +260,9 @@ def main():
     ap.add_argument("--checkpoint", help="play all four cars with a trained policy from this checkpoint folder")
     ap.add_argument("--deterministic", action="store_true", help="with --checkpoint: always the likeliest action")
     ap.add_argument("--seconds", type=float, default=120)
+    ap.add_argument("--full-game", action="store_true",
+                    help="one whole match from kickoff: 5:00 on the clock at 0-0, until it ends (overtime included); "
+                         "--seconds is ignored, apart from a 15-minute safety cap")
     ap.add_argument("--save", help="write the video to this file (.gif, or .mp4 through ffmpeg) instead of a window")
     ap.add_argument("--no-draw", action="store_true")
     ap.add_argument("--view", choices=("3d", "2d"), default="3d",
@@ -278,6 +283,10 @@ def main():
     bot = RoleBot(seed=args.seed, team_modes={0: args.blue_mode, 1: args.orange_mode})
     rng = np.random.default_rng(args.seed)
     obs = env.reset()
+    if args.full_game:  # episodes normally start from a sampled score and clock
+        env.shared_info["match"] = new_match()
+        obs = env.obs_builder.build_obs(env.agents, env.state, env.shared_info)
+        args.seconds = FULL_GAME_CAP
     stats, frames, touches, goals = RoleStats(), [], 0, 0
     mp4 = args.save and args.save.endswith(".mp4")
 
@@ -333,12 +342,21 @@ def main():
         touches += sum(c.ball_touches > 0 for c in env.state.cars.values())
         goals += bool(env.state.goal_scored)
         t += DT
+        if args.full_game:
+            if any(term.values()):  # the match is over; truncations (no-touch timeout) are training-only
+                break
+            reset = False
+            continue
         reset = any(term.values()) or any(trunc.values())
         if reset:
             obs = env.reset()
 
     print(stats.summary(t))
     print(f"{touches / len(env.agents) / (t / 60):.2f} touches per car per minute, {goals} goals in {t / 60:.1f} sim-minutes")
+    if args.full_game:
+        m = env.shared_info["match"]
+        print(f"final score blue {m['blue']} - {m['orange']} orange{' (overtime)' if m['overtime'] else ''}"
+              f"{'' if m['over'] else ' (stopped at the safety cap)'}")
     if writer is not None:
         writer.finish()
         print(f"saved {args.save}")
