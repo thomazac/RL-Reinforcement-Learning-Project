@@ -162,6 +162,13 @@ def test_practice_episodes_end_when_the_play_resolves():
     assert not ends(game(10_000, goal=True), into_blue_net, start={**into_blue_net, "start": "replay"})  # whole match
 
 
+def test_start_weights_set_the_practice_share_and_keep_match_proportions():
+    from playstyle.states import start_weights
+    w = start_weights(0.3)
+    assert w["defend_shot"] == 0.3 and sum(w.values()) == pytest.approx(1.0)
+    assert w["replay"] / w["kickoff"] == pytest.approx(START_WEIGHTS["replay"] / START_WEIGHTS["kickoff"])
+
+
 def test_shot_curriculum_steps_up_on_success_only():
     from playstyle.states import ShotCurriculum
     c = ShotCurriculum()

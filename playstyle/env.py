@@ -23,7 +23,7 @@ REPLAY_STATES = Path(__file__).resolve().parents[1] / "data" / "replay_states.np
 
 
 def make_env(team_size=2, obs_builder=None, reward_fn=None, reward_ttb="v1", coordination=True, seed=None,
-             mixed_starts=False):
+             mixed_starts=False, start_weights=None):
     """seed fixes what the environment itself draws: kickoff spawn points, start states, starting score and clock.
     It cannot make a run repeat exactly: RocketSim's contact physics and demo respawn points differ between
     identical runs (scripts/seed_divergence.py, scripts/rocketsim_determinism.py).
@@ -37,7 +37,7 @@ def make_env(team_size=2, obs_builder=None, reward_fn=None, reward_ttb="v1", coo
         curriculum = ShotCurriculum(level=0.0)  # shared: starts set the level, practice endings feed it outcomes
         start = MixedStart(kickoff, REPLAY_STATES if REPLAY_STATES.exists() else None,
                            seed=None if seed is None else [seed, 1],  # its own stream, apart from RandomMatchStart's
-                           curriculum=curriculum)
+                           weights=start_weights, curriculum=curriculum)
         truncation.append(PracticeEnd(curriculum))
     return RLGym(
         state_mutator=MutatorSequence(FixedTeamSizeMutator(team_size, team_size), start, RandomMatchStart(seed)),
@@ -54,7 +54,8 @@ def make_env(team_size=2, obs_builder=None, reward_fn=None, reward_ttb="v1", coo
 REWARDS = {"1a": ShapedReward, "1b": Phase1bReward}
 
 
-def build_env(reward_ttb="v1", coordination=False, weights=None, team_spirit=0.0, opponent_scale=1.0, phase="1a"):
+def build_env(reward_ttb="v1", coordination=False, weights=None, team_spirit=0.0, opponent_scale=1.0, phase="1a",
+              start_weights=None):
     """The env one RLGym-Learn process runs; the defaults are Phase 1a (playstyle.rewards.PHASE_1A, no
     coordination, team spirit 0). Phase "1b" uses playstyle.rewards.Phase1bReward and always turns coordination on,
     which its penalties read. RLGym-Learn seeds Python's global random with a different number in each
@@ -62,4 +63,5 @@ def build_env(reward_ttb="v1", coordination=False, weights=None, team_spirit=0.0
     starting scores, repeatable from the run's seed. This module stays free of torch so env processes start
     fast and stay small. Use functools.partial to pass other settings; RLGym-Learn calls it with no arguments."""
     return make_env(reward_ttb=reward_ttb, coordination=coordination or phase == "1b", seed=random.getrandbits(32),
-                    reward_fn=REWARDS[phase](weights, team_spirit, opponent_scale), mixed_starts=phase == "1b")
+                    reward_fn=REWARDS[phase](weights, team_spirit, opponent_scale), mixed_starts=phase == "1b",
+                    start_weights=start_weights)

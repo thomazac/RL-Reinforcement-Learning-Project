@@ -35,6 +35,14 @@ MAX_CAR_SPIN = 5.5  # rad/s
 START_WEIGHTS = {"kickoff": 0.055, "replay": 0.077, "random": 0.034, "coord_equidistant": 0.017,
                  "coord_counter": 0.017, "defend_shot": 0.80}
 PRACTICE_SECONDS = 6.0
+
+
+def start_weights(practice_share):
+    """START_WEIGHTS with defend_shot at practice_share of episode starts and the whole-match starts scaled to fill
+    the rest in their usual proportions."""
+    others = {k: v for k, v in START_WEIGHTS.items() if k != "defend_shot"}
+    scale = (1 - practice_share) / sum(others.values())
+    return {**{k: v * scale for k, v in others.items()}, "defend_shot": practice_share}
 GRAVITY = 650.0  # uu/s^2
 
 

@@ -107,6 +107,9 @@ def main():
     ap.add_argument("--ent-coef", type=float, default=0.01)
     ap.add_argument("--team-spirit", type=float, help="default 0 in Phase 1a, 0.4 in 1b (the first 500M ran at 0.2)")
     ap.add_argument("--opponent-scale", type=float, default=1.0)
+    ap.add_argument("--practice-share", type=float,
+                    help="Phase 1b: share of episode starts that are practice shots (default playstyle.states."
+                         "START_WEIGHTS, 0.8); whole-match starts keep their proportions")
     ap.add_argument("--weight", action="append", default=[], metavar="NAME=VALUE",
                     help="override one reward weight, e.g. --weight shot_path=0 (repeatable; applied after --core-scale)")
     ap.add_argument("--core-scale", type=float, default=1.0,
@@ -136,7 +139,7 @@ def main():
     from playstyle.network import N_ACTIONS
     from playstyle.obs import OBS_DIM
     from playstyle.rewards import PHASE_1A, PHASE_1B, scaled_core
-    from playstyle.states import START_WEIGHTS
+    from playstyle.states import START_WEIGHTS, start_weights
     from playstyle.training import CONTROLLER, NETWORKS, RunLogger, make_agent_controller, make_config
 
     run_dir = ROOT / "runs" / "train" / args.run
@@ -155,8 +158,9 @@ def main():
         if name not in weights:
             raise SystemExit(f"--weight: no reward term {name!r}; terms are {list(weights)}")
         weights[name] = float(value)
+    starts = START_WEIGHTS if args.practice_share is None else start_weights(args.practice_share)
     env_fn = functools.partial(build_env, weights=weights, team_spirit=args.team_spirit,
-                               opponent_scale=args.opponent_scale, phase=args.phase)
+                               opponent_scale=args.opponent_scale, phase=args.phase, start_weights=starts)
     if args.init_from and resume:
         raise SystemExit("--init-from starts a new run; use --resume to carry on an existing one")
     controller = make_agent_controller(width=args.width, precision=args.precision,
@@ -175,7 +179,7 @@ def main():
         "resume_from": str(resume) if resume else None, "init_from": args.init_from,
         "reward": {"phase": args.phase, "core_scale": args.core_scale, "weights": weights, "team_spirit": args.team_spirit,
                    "opponent_scale": args.opponent_scale, "coordination": args.phase == "1b", "reward_ttb": "v1"},
-        "start_states": START_WEIGHTS if args.phase == "1b" else "kickoff",
+        "start_states": starts if args.phase == "1b" else "kickoff",
         "network": {"width": args.width, **NETWORKS[args.width], "obs_dim": OBS_DIM, "actions": N_ACTIONS},
         "versions": {"obs": versions.OBS_VERSIONS, "reward": versions.reward_versions("v1")},
         "git": git_state(),
