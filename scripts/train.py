@@ -107,6 +107,8 @@ def main():
     ap.add_argument("--ent-coef", type=float, default=0.01)
     ap.add_argument("--team-spirit", type=float, help="default 0 in Phase 1a, 0.4 in 1b (the first 500M ran at 0.2)")
     ap.add_argument("--opponent-scale", type=float, default=1.0)
+    ap.add_argument("--weight", action="append", default=[], metavar="NAME=VALUE",
+                    help="override one reward weight, e.g. --weight shot_path=0 (repeatable; applied after --core-scale)")
     ap.add_argument("--core-scale", type=float, default=1.0,
                     help="Phase 1b reward: multiplies the core shaping weights (playstyle.rewards.CORE_TERMS); "
                          "Phase 1c anneals it")
@@ -148,6 +150,11 @@ def main():
         raise SystemExit(f"{done:,} steps already done, nothing to do before {stop:,}")
 
     weights = dict(PHASE_1A) if args.phase == "1a" else scaled_core(PHASE_1B, args.core_scale)
+    for override in args.weight:
+        name, value = override.split("=")
+        if name not in weights:
+            raise SystemExit(f"--weight: no reward term {name!r}; terms are {list(weights)}")
+        weights[name] = float(value)
     env_fn = functools.partial(build_env, weights=weights, team_spirit=args.team_spirit,
                                opponent_scale=args.opponent_scale, phase=args.phase)
     if args.init_from and resume:
