@@ -109,7 +109,8 @@ def main():
 
     print(f"\n{len(results)} matches in {(time.time() - start) / 60:.1f} min; "
           f"{sum(not r[4] for r in results)} stopped at the {MATCH_CAP:.0f} s cap")
-    summary = {"checkpoints": checkpoints, "matches_per_pair": args.matches, "pairs": {}, "overall": {}}
+    summary = {"eval": "round_robin", "checkpoint": checkpoints[names[0]], "checkpoints": checkpoints,
+               "matches_per_pair": args.matches, "pairs": {}, "overall": {}}
     for a, b in itertools.combinations(names, 2):
         rows = [r for r in results if (r[0], r[1]) == (a, b)]
         diff = np.array([r[2] - r[3] for r in rows], dtype=float)

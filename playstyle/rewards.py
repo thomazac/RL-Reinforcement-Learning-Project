@@ -138,15 +138,22 @@ NEAR_BALL = 1000.0  # uu, for both_near (human GC1 baseline: scripts/human_basel
 ROTATION_ARRIVED = 600.0  # uu from the rotation spot counts as in it
 
 
+# Where GC1 second men stand (scripts/second_man_depth.py, 167,582 replay samples): the fraction of the way from the
+# far post toward the ball, fitted to the medians per ball-progress band (0.54, 0.60, 0.66, 0.70, 0.70). The first
+# version used 0.15 + 0.4 progress, about 0.35 deeper everywhere; under it phase1b-4 lost 3.1 goals per match to its
+# parent while crowding fell.
+ROTATION_DEPTH = (0.54, 0.21)  # intercept, slope in progress
+
+
 def rotation_spot(ball_pos, team):
     """Where the second man should be: on the line from the far post (the post away from the ball's side) toward
-    the ball, deeper the deeper the ball is: 15% of the way out with the ball at his own goal line, 55% with it at the
-    opponent's."""
+    the ball, a little further out the further up the field the ball is (ROTATION_DEPTH, from human GC1 play)."""
     sign = own_goal_sign(team)
     far_x = -np.sign(ball_pos[0]) * 800.0 if abs(ball_pos[0]) > 300 else 0.0
     post = np.array([far_x, sign * (GOAL_Y - 300)])
     progress = (-sign * ball_pos[1] + GOAL_Y) / (2 * GOAL_Y)  # 0 at the own goal line, 1 at the opponent's
-    return post + (0.15 + 0.4 * np.clip(progress, 0, 1)) * (np.asarray(ball_pos[:2]) - post)
+    fraction = ROTATION_DEPTH[0] + ROTATION_DEPTH[1] * np.clip(progress, 0, 1)
+    return post + fraction * (np.asarray(ball_pos[:2]) - post)
 
 
 def crossing_point(slices, team):

@@ -162,14 +162,20 @@ def test_speed_to_ball_pays_only_the_first_man(rig):
     assert r["blue-1"]["speed_to_ball"] == 0
 
 
-def test_rotation_spot_sits_off_the_far_post_and_deepens_with_the_ball():
-    ball_right_deep = rotation_spot(np.array([2000.0, -4000.0, 93]), team=0)  # ball on blue's right, deep
-    ball_right_high = rotation_spot(np.array([2000.0, 4000.0, 93]), team=0)  # same side, in orange's half
-    assert ball_right_deep[0] < 0  # ball deep on the right: off the far (left) post
-    assert abs(ball_right_high[0]) < 2000  # ball upfield: toward the middle, short of the ball's side
-    assert ball_right_deep[1] < ball_right_high[1] < 0  # deeper when the ball is deeper, always in blue's half
-    orange = rotation_spot(np.array([2000.0, 4000.0, 93]), team=1)  # ball deep in orange's half
-    assert orange[1] > 0 and orange[0] < 0
+def test_rotation_spot_matches_human_second_men():
+    from playstyle.rewards import ROTATION_DEPTH
+    ball = np.array([2000.0, 0.0, 93])  # midfield, on blue's right
+    spot = rotation_spot(ball, team=0)
+    post = np.array([-800.0, -(5120 - 300)])  # blue's far (left) post
+    fraction = (spot - post) @ (ball[:2] - post) / ((ball[:2] - post) @ (ball[:2] - post))
+    assert fraction == pytest.approx(ROTATION_DEPTH[0] + ROTATION_DEPTH[1] * 0.5)
+    assert 0.6 < fraction < 0.7  # GC1 second men: median 0.66 with the ball at midfield
+    deep = rotation_spot(np.array([2000.0, -4000.0, 93]), team=0)
+    high = rotation_spot(np.array([2000.0, 4000.0, 93]), team=0)
+    assert deep[0] < 2000 - 500 and high[0] < 2000  # toward the middle from the ball's side
+    assert deep[1] < high[1]  # deeper when the ball is deeper
+    orange = rotation_spot(np.array([2000.0, 4000.0, 93]), team=1)  # mirrored for orange
+    assert orange[1] > 0
 
 
 def test_rotation_pays_only_the_second_man(rig):

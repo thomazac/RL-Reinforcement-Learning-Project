@@ -6,9 +6,10 @@ boundary. The first stage starts from --init-from if the run has no checkpoints 
 critic warm-up, since the reward changes. If train.py exits before its stage is done (a crash, a killed process),
 the run is resumed from its newest checkpoint, giving up after --max-restarts tries in a row without progress.
 
-Every kept checkpoint (train.py --keep-every) gets 10 full matches against the previous kept checkpoint (the first
-against --init-from), the clean kickoff eval and the shot eval at full difficulty and at level 0, run alongside
-training and appended to runs/train/<run>/evals.jsonl. Runner events go to stages.log.
+Every kept checkpoint (train.py --keep-every) gets 200 full matches (scripts/round_robin.py) against the previous kept
+checkpoint and against --init-from (the gate: it must not lose to where the run started), the clean kickoff eval and
+the shot eval at full difficulty and at level 0, run alongside training and appended to runs/train/<run>/evals.jsonl.
+Runner events go to stages.log.
 
 While running it asks Windows not to sleep. It cannot stop Windows Update restarts: pause updates for the run.
 
@@ -72,7 +73,7 @@ class Evaluator(threading.Thread):
     def done_checkpoints(self):
         if not self.results.exists():
             return set()
-        return {json.loads(line)["checkpoint"] for line in self.results.read_text().splitlines() if line.strip()}
+        return {json.loads(line).get("checkpoint") for line in self.results.read_text().splitlines() if line.strip()}
 
     def pending(self):
         kept = sorted((p for p in (self.run_dir / "kept").glob("*M") if p.is_dir()), key=lambda p: int(p.name[:-1]))
@@ -88,10 +89,11 @@ class Evaluator(threading.Thread):
         while True:
             for checkpoint in self.pending():
                 self.log(f"evaluating {checkpoint.name}")
-                opponent = self.previous(checkpoint)
-                if opponent is not None:  # head to head against the previous kept checkpoint
-                    subprocess.run([PYTHON, str(ROOT / "scripts" / "versus.py"), "--a", str(checkpoint), "--b",
-                                    str(opponent), "--matches", "10", "--json", str(self.results)], cwd=ROOT,
+                # Head to head, 200 full matches each: against the previous kept checkpoint and the starting one.
+                for opponent in dict.fromkeys(p for p in (self.previous(checkpoint), self.start_checkpoint) if p):
+                    subprocess.run([PYTHON, str(ROOT / "scripts" / "round_robin.py"), "--checkpoints",
+                                    f"{checkpoint.name}={checkpoint}", f"opponent={opponent}", "--matches", "200",
+                                    "--workers", "4", "--json", str(self.results)], cwd=ROOT,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 for script, *args in self.EVALS:
                     subprocess.run([PYTHON, str(ROOT / "scripts" / script), "--checkpoint", str(checkpoint), *args,
