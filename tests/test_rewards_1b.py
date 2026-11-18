@@ -196,7 +196,27 @@ def test_both_near_flags_a_team_with_both_cars_at_the_ball(rig):
     assert r["orange-0"]["both_near"] == r["orange-1"]["both_near"] == 0
 
 
-def test_practice_credit_only_in_practice_episodes():
+def test_shot_path_pays_the_nearest_defender_for_closing_on_the_crossing_point():
+    shot = path((0, -3000, 300), (0, -2500, 0))  # into blue's net at x = 0
+    rig = Rig()
+    rig.info["ball_slices"] = shot
+    rig.ball(pos=(0, -3000, 300), vel=(0, -2500, 0))
+    keeper, other = rig.state.cars["blue-0"], rig.state.cars["blue-1"]
+    keeper.physics.position = np.array([1000, -5200, 17], dtype=np.float32)
+    rig.fn.reset(rig.agents, rig.state, rig.info)
+    keeper.physics.position = np.array([1000 - 2300 * 8 / 120 / 2, -5200, 17], dtype=np.float32)  # half speed closer
+    other.physics.position = np.array([2000 - 2300 * 8 / 120, -3000, 17], dtype=np.float32)  # full speed, not nearest
+    r = rig.step()
+    assert r["blue-0"]["shot_path"] == pytest.approx(0.5, abs=0.02) and r["blue-1"]["shot_path"] == 0
+    assert all(r[a]["shot_path"] == 0 for a in ("orange-0", "orange-1"))  # not their net
+    keeper.physics.position = np.array([1000, -5200, 17], dtype=np.float32)  # back out again
+    assert rig.step()["blue-0"]["shot_path"] == pytest.approx(-0.5, abs=0.02)
+    rig.info["ball_slices"] = path((0, -3000, 300), (0, 2500, 0))  # not heading in: nothing
+    keeper.physics.position = np.array([500, -5200, 17], dtype=np.float32)
+    assert rig.step()["blue-0"]["shot_path"] == 0
+
+
+def test_shot_touch_only_in_practice_episodes():
     shot = path((0, -3000, 300), (0, -2500, 0))  # into blue's net at x = 0 in ~0.85 s
     for practice in (True, False):
         rig = Rig()
@@ -205,15 +225,11 @@ def test_practice_credit_only_in_practice_episodes():
             rig.info["start"] = "defend_shot"
         rig.ball(pos=(0, -3000, 300), vel=(0, -2500, 0))
         rig.fn.reset(rig.agents, rig.state, rig.info)
-        keeper = rig.state.cars["blue-0"]
-        keeper.physics.position = np.array([1000, -5000, 17], dtype=np.float32)
-        keeper.physics.linear_velocity = np.array([-2300, 0, 0], dtype=np.float32)  # straight at the crossing point
         r = rig.step()["blue-0"]
         if practice:
             assert r["practice_shot"] == 1 and r["practice_level"] == pytest.approx(1.3)
-            assert r["path_approach"] == pytest.approx(1.0, abs=0.05)
         else:
-            assert r["practice_shot"] == r["path_approach"] == r["practice_level"] == 0
+            assert r["practice_shot"] == r["practice_level"] == 0
         rig.touch("blue-0")  # a touch that takes it off course
         rig.info["ball_slices"] = path((0, -4000, 300), (0, 2000, 0))
         r = rig.step()["blue-0"]

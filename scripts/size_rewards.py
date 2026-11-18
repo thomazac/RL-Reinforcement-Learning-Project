@@ -24,9 +24,11 @@ from playstyle.rewards import PHASE_1B
 
 STEPS_PER_MATCH = MATCH_SECONDS * TICK_RATE / TICK_SKIP
 FIXED = {"goal": 10.0, "concede": -8.0, "win": 10.0, "shot": 0.0, "practice_shot": 0.0, "practice_defended": 0.0,
-         "practice_level": 0.0, "both_near": 0.0, "path_approach": 0.015, "shot_touch": 1.0}
+         "practice_level": 0.0, "both_near": 0.0, "shot_touch": 1.0}
 TARGETS = {"touch": 3.0, "air_touch": 1.5, "save": 2.0, "clear": 1.5, "boost": 2.0, "speed_to_ball": 1.0,
-           "ball_to_goal": 3.0, "double_commit": -1.0, "nobody_challenging": -1.0, "nobody_home": -1.0, "rotation": 1.0}
+           "ball_to_goal": 3.0, "double_commit": -1.0, "nobody_challenging": -1.0, "nobody_home": -1.0, "rotation": 1.0,
+           "shot_path": 2.0}
+SIGNED = ("ball_to_goal", "shot_path")  # sized on mean absolute value: their signed totals partly cancel
 
 
 def main():
@@ -61,7 +63,7 @@ def main():
     print(f"  {'term':20s} {'raw total':>10s} {'mean |raw|':>10s} {'fires':>8s} {'weight':>9s} {'weighted total':>14s}")
     weights = {}
     for i, n in enumerate(names):
-        size = absolute[i] * per_match if n == "ball_to_goal" else total[i] * per_match
+        size = absolute[i] * per_match if n in SIGNED else total[i] * per_match
         if n in FIXED:
             weights[n] = FIXED[n]
         else:
