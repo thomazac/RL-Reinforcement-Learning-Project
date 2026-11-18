@@ -12,7 +12,7 @@ from .match import MatchEngine, MatchOverCondition, RandomMatchStart, SeededKick
 from .obs import EntityObs, RecordingActionParser
 from .rewards import Phase1bReward, ShapedReward
 from .shared_info import TTBRoleProvider
-from .states import MixedStart, PracticeEnd
+from .states import MixedStart, PracticeEnd, ShotCurriculum
 
 TICK_SKIP = 8
 NO_TOUCH_SECONDS = 30
@@ -34,9 +34,11 @@ def make_env(team_size=2, obs_builder=None, reward_fn=None, reward_ttb="v1", coo
     start = kickoff
     truncation = [NoTouchTimeoutCondition(NO_TOUCH_SECONDS), TimeoutCondition(MAX_EPISODE_SECONDS)]
     if mixed_starts:
+        curriculum = ShotCurriculum(level=0.0)  # shared: starts set the level, practice endings feed it outcomes
         start = MixedStart(kickoff, REPLAY_STATES if REPLAY_STATES.exists() else None,
-                           seed=None if seed is None else [seed, 1])  # its own stream, apart from RandomMatchStart's
-        truncation.append(PracticeEnd())
+                           seed=None if seed is None else [seed, 1],  # its own stream, apart from RandomMatchStart's
+                           curriculum=curriculum)
+        truncation.append(PracticeEnd(curriculum))
     return RLGym(
         state_mutator=MutatorSequence(FixedTeamSizeMutator(team_size, team_size), start, RandomMatchStart(seed)),
         obs_builder=obs_builder or EntityObs(),

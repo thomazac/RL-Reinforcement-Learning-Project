@@ -5,7 +5,7 @@ from playstyle.ball_prediction import SLICE_TIMES
 from playstyle.env import build_env
 from playstyle.match import new_match
 from playstyle.rewards import (BALL_MAX_SPEED, CEILING, PHASE_1B, PHASE_1B_TERMS, TOUCH_COOLDOWN_TICKS,
-                               Phase1bReward)
+                               Phase1bReward, rotation_spot)
 
 NO_EVENTS = {"double_commit": None, "excused": None, "revoked": None, "nobody_challenging": None,
              "nobody_home": False}
@@ -23,8 +23,10 @@ class Rig:
         env = build_env(phase="1b")
         env.reset()
         self.state, self.agents = env.state, list(env.agents)
-        for car in self.state.cars.values():
+        spots = {"blue-0": (-2000, -3000), "blue-1": (2000, -3000), "orange-0": (-2000, 3000), "orange-1": (2000, 3000)}
+        for a, car in self.state.cars.items():  # fixed spots: the env's own start may put cars anywhere
             car.ball_touches, car.on_ground, car.boost_amount, car.demo_respawn_timer = 0, True, 50.0, 0.0
+            car.physics.position = np.array([*spots[a], 17], dtype=np.float32)
             car.physics.linear_velocity = np.zeros(3, dtype=np.float32)
         self.ball(pos=(0, 0, 93), vel=(0, 0, 0))
         self.state.goal_scored = False
@@ -158,6 +160,65 @@ def test_speed_to_ball_pays_only_the_first_man(rig):
     r = rig.step()
     assert r["blue-0"]["speed_to_ball"] == pytest.approx(1000 / 2300, rel=1e-3)
     assert r["blue-1"]["speed_to_ball"] == 0
+
+
+def test_rotation_spot_sits_off_the_far_post_and_deepens_with_the_ball():
+    ball_right_deep = rotation_spot(np.array([2000.0, -4000.0, 93]), team=0)  # ball on blue's right, deep
+    ball_right_high = rotation_spot(np.array([2000.0, 4000.0, 93]), team=0)  # same side, in orange's half
+    assert ball_right_deep[0] < 0  # ball deep on the right: off the far (left) post
+    assert abs(ball_right_high[0]) < 2000  # ball upfield: toward the middle, short of the ball's side
+    assert ball_right_deep[1] < ball_right_high[1] < 0  # deeper when the ball is deeper, always in blue's half
+    orange = rotation_spot(np.array([2000.0, 4000.0, 93]), team=1)  # ball deep in orange's half
+    assert orange[1] > 0 and orange[0] < 0
+
+
+def test_rotation_pays_only_the_second_man(rig):
+    rig.info["roles"] = {"blue-0": "first", "blue-1": "second", "orange-0": "first", "orange-1": "second"}
+    second = rig.state.cars["blue-1"]
+    spot = rotation_spot(rig.state.ball.position.astype(float), 0)
+    second.physics.position = np.array([spot[0] + 2000, spot[1], 17], dtype=np.float32)
+    second.physics.linear_velocity = np.array([-1150, 0, 0], dtype=np.float32)  # straight at the spot, half speed
+    first = rig.state.cars["blue-0"]
+    first.physics.position = np.array([spot[0] + 2000, spot[1] + 500, 17], dtype=np.float32)
+    first.physics.linear_velocity = np.array([-1150, 0, 0], dtype=np.float32)
+    r = rig.step()
+    assert r["blue-1"]["rotation"] == pytest.approx(0.5, abs=1e-3) and r["blue-0"]["rotation"] == 0
+    second.physics.position = np.array([spot[0] + 100, spot[1], 17], dtype=np.float32)  # arrived
+    second.physics.linear_velocity = np.zeros(3, dtype=np.float32)
+    assert rig.step()["blue-1"]["rotation"] == 1.0
+
+
+def test_both_near_flags_a_team_with_both_cars_at_the_ball(rig):
+    for a, pos in (("blue-0", (500, 0, 17)), ("blue-1", (-600, 300, 17)), ("orange-0", (700, 0, 17))):
+        rig.state.cars[a].physics.position = np.array(pos, dtype=np.float32)
+    r = rig.step()
+    assert r["blue-0"]["both_near"] == r["blue-1"]["both_near"] == 1
+    assert r["orange-0"]["both_near"] == r["orange-1"]["both_near"] == 0
+
+
+def test_practice_credit_only_in_practice_episodes():
+    shot = path((0, -3000, 300), (0, -2500, 0))  # into blue's net at x = 0 in ~0.85 s
+    for practice in (True, False):
+        rig = Rig()
+        rig.info.update(ball_slices=shot, practice_level=0.3)
+        if practice:
+            rig.info["start"] = "defend_shot"
+        rig.ball(pos=(0, -3000, 300), vel=(0, -2500, 0))
+        rig.fn.reset(rig.agents, rig.state, rig.info)
+        keeper = rig.state.cars["blue-0"]
+        keeper.physics.position = np.array([1000, -5000, 17], dtype=np.float32)
+        keeper.physics.linear_velocity = np.array([-2300, 0, 0], dtype=np.float32)  # straight at the crossing point
+        r = rig.step()["blue-0"]
+        if practice:
+            assert r["practice_shot"] == 1 and r["practice_level"] == pytest.approx(1.3)
+            assert r["path_approach"] == pytest.approx(1.0, abs=0.05)
+        else:
+            assert r["practice_shot"] == r["path_approach"] == r["practice_level"] == 0
+        rig.touch("blue-0")  # a touch that takes it off course
+        rig.info["ball_slices"] = path((0, -4000, 300), (0, 2000, 0))
+        r = rig.step()["blue-0"]
+        assert r["practice_shot"] == 0  # first step only
+        assert (r["shot_touch"], r["practice_defended"]) == ((1, 1) if practice else (0, 0))
 
 
 def test_coordination_events_charge_the_right_cars(rig):

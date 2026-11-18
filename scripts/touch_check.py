@@ -151,6 +151,7 @@ def bots(checkpoint, minutes, seed):
     print(f"  saves per player per 5 minutes   {rate['save'] * per5:6.2f}   (human GC1, same definition: 1.28)")
     print(f"  shots per player per 5 minutes   {rate['shot'] * per5:6.2f}   (human GC1, same definition: 2.80)")
     print(f"  double-commit share of time      {2 * rate['double_commit']:6.2%}   empty net {rate['nobody_home']:.1%}")
+    print(f"  both teammates near the ball     {rate['both_near']:6.1%}   of the time, per team (human GC1 live play: 3.9%)")
     print(f"  episode ends ({n_ep})            " + ", ".join(f"{k} {v / max(n_ep, 1):.0%}" for k, v in ends.items()))
     hit, miss = np.array(calls["hit"]), np.array(calls["miss"])
     n = len(hit) + len(miss)

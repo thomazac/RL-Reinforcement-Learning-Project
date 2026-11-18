@@ -210,6 +210,11 @@ def phase_1b_metrics(tp, weights):
         "Nobody Challenging Share": 2 * rates["nobody_challenging"],
         "Empty Net Share": rates["nobody_home"],
     }
+    if "both_near" in rates:
+        play["Both Teammates Near Ball Share"] = rates["both_near"]  # per team; both cars of the team are flagged
+        shots = rates["practice_shot"] / 2  # flagged for both defenders
+        play["Practice Defended Rate"] = rates["practice_defended"] / shots if shots else 0.0
+        play["Practice Level"] = max(medians["practice_level"] - 1.0, 0.0) if rates["practice_level"] else 0.0
     return {"Per 5 Minutes (weighted, per car)": per5, "Per 5 Minutes (events)": events, "Play": play}
 
 

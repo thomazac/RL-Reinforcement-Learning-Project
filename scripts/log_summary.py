@@ -47,6 +47,9 @@ def main():
                   f"hit {play['Median Hit Strength (uu/s)']:5.0f}  per 5 min: goals {ev['Goals (both teams)']:4.2f} "
                   f"shots {ev['Shots per Player']:4.2f} saves {ev['Saves per Player']:4.2f}  "
                   f"double-commit {play['Double-Commit Share']:.2%}  empty net {play['Empty Net Share']:.1%}  "
+                  + (f"both near {play['Both Teammates Near Ball Share']:.1%}  practice: defended "
+                     f"{play['Practice Defended Rate']:.0%} level {play['Practice Level']:.1f}  "
+                     if "Practice Level" in play else "") +
                   f"KL {ppo['Mean KL Divergence']:.4f}  ratio {mon['First Minibatch Ratio']:.4f}  "
                   f"clip {mon['Reward Clip Share']:.2%} (max {mon['Largest Scaled Reward']:.1f})  "
                   f"entropy {ppo['Actor Entropy']:.3f}  critic {ppo['Critic Loss']:.3f}  "

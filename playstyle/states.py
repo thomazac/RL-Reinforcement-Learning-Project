@@ -28,11 +28,12 @@ CAR_GAP = 2 * float(np.linalg.norm(HITBOX_HALF)) + 5  # hitbox centers at least 
 CONTACT_GAP = 5.0  # uu of clearance between the ball and any hitbox
 MAX_CAR_SPIN = 5.5  # rad/s
 
-# Shares of episode starts. defend_shot episodes are short practice (PracticeEnd), so their 35% of episodes is only
-# about 3% of steps: a whole-match episode runs ~1,500 steps, a practice one at most PRACTICE_SECONDS (90 steps).
-# At 10% with whole-match episodes they gave each player under one practice shot per hour of play.
-START_WEIGHTS = {"kickoff": 0.18, "replay": 0.25, "random": 0.11, "coord_equidistant": 0.055, "coord_counter": 0.055,
-                 "defend_shot": 0.35}
+# Shares of episode starts. defend_shot episodes are short practice (PracticeEnd, ~30 steps; at most 90), whole-match
+# episodes run ~2,700 steps (clocks start anywhere up to 5 minutes, plus overtime). Measured at 35% of episodes,
+# practice was only ~0.6% of steps (0.8 practice shots per 5 minutes of play); 80% of episodes gives ~5-6% of steps,
+# with whole matches still ~95% of training. The whole-match starts keep their relative shares.
+START_WEIGHTS = {"kickoff": 0.055, "replay": 0.077, "random": 0.034, "coord_equidistant": 0.017,
+                 "coord_counter": 0.017, "defend_shot": 0.80}
 PRACTICE_SECONDS = 6.0
 GRAVITY = 650.0  # uu/s^2
 
@@ -224,24 +225,37 @@ def coord_counter(rng):
     return mirror(ball, cars) if rng.random() < 0.5 else (ball, cars)
 
 
-def defend_shot(rng):
-    """A shot already on its way into one team's net: the ball on a ballistic path into the goal mouth, arriving in
-    0.8-2 s. One defender near the net facing the ball, the other rotating back from upfield; the shooter just behind
-    the ball, the other attacker upfield. Bots can only learn saves by facing shots."""
-    pos = np.array([rng.uniform(-2500, 2500), rng.uniform(-4200, -1500), rng.uniform(BALL_RADIUS, 400)])
-    target = np.array([rng.uniform(-700, 700), -FIELD_Y - 200, rng.uniform(150, 550)])  # blue (team 0) defends -y
-    flight = rng.uniform(0.8, 2.0)
+def _lerp(easy, hard, level):
+    return easy + (hard - easy) * level
+
+
+def defend_shot(rng, level=1.0):
+    """A shot already on its way into one team's net: the ball on a ballistic path into the goal mouth. One defender
+    near the net facing the ball, the other rotating back from upfield; the shooter just behind the ball, the other
+    attacker upfield. Bots can only learn saves by facing shots.
+
+    level (0..1, ShotCurriculum) sets the difficulty: at 0 the shot takes 1.8-2.5 s, crosses the line 110-200 uu up
+    and is aimed within 150 uu of the keeper; at 1 it takes 0.8-2 s, crosses 150-550 up, anywhere in the goal mouth."""
+    keeper_pos = (rng.uniform(-800, 800), rng.uniform(-5000, -4300))
+    pos = np.array([rng.uniform(-2500, 2500), rng.uniform(-4200, -1500),
+                    rng.uniform(BALL_RADIUS, _lerp(150, 400, level))])
+    spread = _lerp(150, 700, level)
+    aim_x = (1 - level) * keeper_pos[0] + rng.uniform(-spread, spread)
+    target = np.array([np.clip(aim_x, -750, 750), -FIELD_Y - 200,  # blue (team 0) defends -y
+                       rng.uniform(_lerp(110, 150, level), _lerp(200, 550, level))])
+    flight = rng.uniform(_lerp(1.8, 0.8, level), _lerp(2.5, 2.0, level))
     vel = (target - pos) / flight
     vel[2] += 0.5 * GRAVITY * flight
     ball = {"pos": pos, "vel": vel, "ang_vel": np.zeros(3)}
-    keeper_pos = (rng.uniform(-800, 800), rng.uniform(-5000, -4300))
     keeper = ground_car(keeper_pos, _facing(keeper_pos, pos), rng.uniform(0, 500), rng.uniform(0, 100))
     back_pos = (rng.uniform(-3500, 3500), pos[1] + rng.uniform(-500, 2500))
     back = ground_car(back_pos, -np.pi / 2 + rng.uniform(-0.6, 0.6), rng.uniform(500, 1500), rng.uniform(0, 100))
     heading = vel[:2] / np.linalg.norm(vel[:2])
-    shooter_pos = pos[:2] - rng.uniform(250, 450) * heading
-    shooter = ground_car(shooter_pos, float(np.arctan2(heading[1], heading[0])), rng.uniform(1000, 1800),
-                         rng.uniform(0, 100))
+    # On easy (slow) shots a shooter following through at full speed catches his own shot (23% of level-0 shots),
+    # so he starts slower and further back there.
+    shooter_pos = pos[:2] - rng.uniform(_lerp(700, 250, level), _lerp(1000, 450, level)) * heading
+    shooter = ground_car(shooter_pos, float(np.arctan2(heading[1], heading[0])),
+                         rng.uniform(_lerp(300, 1000, level), _lerp(800, 1800, level)), rng.uniform(0, 100))
     support_pos = (rng.uniform(-3000, 3000), pos[1] + rng.uniform(1000, 3500))
     support = ground_car(support_pos, -np.pi / 2 + rng.uniform(-0.8, 0.8), rng.uniform(500, 1500), rng.uniform(0, 100))
     cars = [keeper, back, shooter, support]
@@ -257,11 +271,36 @@ def state_is_valid(ball, cars):
                        np.array([c["rot"] for c in cars], dtype=np.float64))
 
 
+class ShotCurriculum:
+    """Adaptive difficulty for defend_shot, one per env process (no coordination between processes needed): starts
+    easy and steps up by STEP each time more than PASS_RATE of the last WINDOW practice shots were defended. A save
+    rate near zero gives PPO almost no successful examples; this keeps it in the range where it can learn."""
+
+    STEP, PASS_RATE, WINDOW = 0.1, 0.30, 40
+
+    def __init__(self, level=0.0):
+        self.level = level
+        self.results = []
+
+    def record(self, defended):
+        self.results.append(bool(defended))
+        if len(self.results) >= self.WINDOW:
+            if np.mean(self.results[-self.WINDOW:]) > self.PASS_RATE and self.level < 1.0:
+                self.level = min(1.0, round(self.level + self.STEP, 6))
+                self.results.clear()
+            else:
+                self.results = self.results[-self.WINDOW:]
+
+
 class PracticeEnd(DoneCondition):
     """Truncation for defend_shot episodes, which are save practice rather than matches: they end once the play
     resolves (a goal, or a defender touched the ball and it is no longer on course for the net) or after
     PRACTICE_SECONDS. Truncated, not terminated, so the value bootstraps and nothing learns that a game ends there.
-    Other starts are whole matches and never end here."""
+    Other starts are whole matches and never end here. Outcomes go to the curriculum: defended counts as a success,
+    a goal as a failure; a shot that times out without either is not counted."""
+
+    def __init__(self, curriculum=None):
+        self.curriculum = curriculum
 
     def reset(self, agents, initial_state, shared_info):
         self.active = shared_info.get("start") == "defend_shot"
@@ -271,9 +310,15 @@ class PracticeEnd(DoneCondition):
     def is_done(self, agents, state, shared_info):
         done = False
         if self.active:
-            done = (state.tick_count - self.start_tick) / TICK_RATE >= PRACTICE_SECONDS or bool(state.goal_scored)
             touched = any(c.ball_touches > 0 for c in state.cars.values() if c.team_num == self.defending)
-            done |= touched and not enters_net(np.asarray(shared_info["ball_slices"]), self.defending, SHOT_HORIZON)
+            defended = touched and not enters_net(np.asarray(shared_info["ball_slices"]), self.defending, SHOT_HORIZON)
+            conceded = bool(state.goal_scored) and state.scoring_team != self.defending
+            done = defended or bool(state.goal_scored) \
+                or (state.tick_count - self.start_tick) / TICK_RATE >= PRACTICE_SECONDS
+            if done:
+                if self.curriculum is not None and (defended or conceded):
+                    self.curriculum.record(defended)
+                self.active = False
         return {a: done for a in agents}
 
 
@@ -282,8 +327,9 @@ class MixedStart(StateMutator):
     realistic state or a coordination test, by START_WEIGHTS. Generated states are redrawn until valid (replay
     states were validated at extraction). The choice goes to shared_info["start"]."""
 
-    def __init__(self, kickoff, replay_path=None, seed=None, weights=None):
+    def __init__(self, kickoff, replay_path=None, seed=None, weights=None, curriculum=None):
         self.kickoff = kickoff
+        self.curriculum = curriculum or ShotCurriculum(level=1.0)
         self.rng = np.random.default_rng(seed)
         self.replays = ReplayStates(replay_path) if replay_path else None
         w = dict(START_WEIGHTS if weights is None else weights)
@@ -298,8 +344,15 @@ class MixedStart(StateMutator):
         if kind == "kickoff":
             self.kickoff.apply(state, shared_info)
             return
+        if kind == "defend_shot":
+            shared_info["practice_level"] = self.curriculum.level
         for _ in range(100):
-            ball, cars = self.replays.sample(self.rng) if kind == "replay" else GENERATORS[kind](self.rng)
+            if kind == "replay":
+                ball, cars = self.replays.sample(self.rng)
+            elif kind == "defend_shot":
+                ball, cars = defend_shot(self.rng, self.curriculum.level)
+            else:
+                ball, cars = GENERATORS[kind](self.rng)
             if state_is_valid(ball, cars):
                 apply_state(state, ball, cars)
                 return

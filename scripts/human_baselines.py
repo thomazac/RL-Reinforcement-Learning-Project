@@ -45,6 +45,7 @@ def replay(path, predictor):
     alive = ~np.all(cars[:, :, 0:3] == 0, axis=2)
     near = (np.linalg.norm(cars[:, :, 0:3] - ball[:, None, 0:3], axis=2) < NEAR) & alive
     counts = near[live].sum(axis=1)
+    both = (near[live][:, 0] & near[live][:, 1]).sum() + (near[live][:, 2] & near[live][:, 3]).sum()  # team-frames
 
     def predicted(t):
         b = ball[min(np.searchsorted(time, t), len(time) - 1)]
@@ -66,7 +67,8 @@ def replay(path, predictor):
     stats = headers.get("PlayerStats", [])
     return dict(minutes=headers["TotalSecondsPlayed"] / 60, saves=saves, shots=shots,
                 rl_saves=sum(s.get("Saves", 0) for s in stats), rl_shots=sum(s.get("Shots", 0) for s in stats),
-                near_sum=float(counts.sum()), all_four=float((counts == 4).sum()), frames=len(counts))
+                near_sum=float(counts.sum()), all_four=float((counts == 4).sum()), both_near=float(both),
+                frames=len(counts))
 
 
 def main():
@@ -90,7 +92,8 @@ def main():
     print(f"  saves  (our definition) {total['saves'] * per5:5.2f}   (Rocket League's count {total['rl_saves'] * per5:5.2f})")
     print(f"  shots  (our definition) {total['shots'] * per5:5.2f}   (Rocket League's count {total['rl_shots'] * per5:5.2f})")
     print(f"Crowding over live play: cars within {NEAR:.0f} uu of the ball mean {total['near_sum'] / total['frames']:.2f} "
-          f"of 4; all four {total['all_four'] / total['frames']:.1%} of the time")
+          f"of 4; all four {total['all_four'] / total['frames']:.1%} of the time; both teammates of a team "
+          f"{total['both_near'] / (2 * total['frames']):.1%} of the time (per team)")
 
 
 if __name__ == "__main__":

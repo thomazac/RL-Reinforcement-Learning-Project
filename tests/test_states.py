@@ -139,21 +139,87 @@ def test_practice_episodes_end_when_the_play_resolves():
 
     def game(tick, vel_y=-2000, goal=False, touches=(0, 0, 0, 0)):
         cars = {a: NS(team_num=t, ball_touches=n) for a, t, n in zip(("b0", "b1", "o0", "o1"), (0, 0, 1, 1), touches)}
-        return NS(tick_count=tick, goal_scored=goal, cars=cars, ball=NS(linear_velocity=np.array([0.0, vel_y, 0.0])))
+        return NS(tick_count=tick, goal_scored=goal, scoring_team=1 if goal else None, cars=cars,
+                  ball=NS(linear_velocity=np.array([0.0, vel_y, 0.0])))
 
     into_blue_net = {"ball_slices": np.tile([0.0, -5300.0, 300.0], (31, 1)), "start": "defend_shot"}
     away = {"ball_slices": np.tile([0.0, -2000.0, 300.0], (31, 1)), "start": "defend_shot"}
     agents = ["b0", "b1", "o0", "o1"]
     end = PracticeEnd()
-    end.reset(agents, game(0), into_blue_net)
-    assert not any(end.is_done(agents, game(8), into_blue_net).values())
-    assert all(end.is_done(agents, game(int(PRACTICE_SECONDS * 120)), into_blue_net).values())
-    assert all(end.is_done(agents, game(8, goal=True), into_blue_net).values())
-    assert all(end.is_done(agents, game(8, touches=(1, 0, 0, 0)), away).values())  # blue touched it off course
-    assert not any(end.is_done(agents, game(8, touches=(1, 0, 0, 0)), into_blue_net).values())  # touched, still going in
-    assert not any(end.is_done(agents, game(8, touches=(0, 0, 1, 0)), away).values())  # only the attacker touched it
-    end.reset(agents, game(0), {**into_blue_net, "start": "replay"})  # whole-match episodes never end here
-    assert not any(end.is_done(agents, game(10_000, goal=True), into_blue_net).values())
+
+    def ends(g, info, start=into_blue_net):
+        end.reset(agents, game(0), start)  # a fresh practice episode for each case
+        result = end.is_done(agents, g, info)
+        assert len(set(result.values())) == 1
+        return result["b0"]
+
+    assert not ends(game(8), into_blue_net)
+    assert ends(game(int(PRACTICE_SECONDS * 120)), into_blue_net)
+    assert ends(game(8, goal=True), into_blue_net)
+    assert ends(game(8, touches=(1, 0, 0, 0)), away)  # blue touched it off course
+    assert not ends(game(8, touches=(1, 0, 0, 0)), into_blue_net)  # touched, still going in
+    assert not ends(game(8, touches=(0, 0, 1, 0)), away)  # only the attacker touched it
+    assert not ends(game(10_000, goal=True), into_blue_net, start={**into_blue_net, "start": "replay"})  # whole match
+
+
+def test_shot_curriculum_steps_up_on_success_only():
+    from playstyle.states import ShotCurriculum
+    c = ShotCurriculum()
+    for i in range(40):
+        c.record(i % 2 == 0)  # 50% defended
+    assert c.level == pytest.approx(0.1) and c.results == []
+    for _ in range(100):
+        c.record(False)
+    assert c.level == pytest.approx(0.1) and len(c.results) == 40  # window kept, no step down
+    c.level = 1.0
+    for _ in range(40):
+        c.record(True)
+    assert c.level == 1.0
+
+
+def test_easy_shots_are_slower_lower_and_at_the_keeper():
+    from playstyle.ball_prediction import BallPredictor
+    from playstyle.rewards import crossing_point
+    rng, predictor = np.random.default_rng(3), BallPredictor()
+
+    def stats(level):
+        speeds, misses = [], []
+        for _ in range(200):
+            ball, cars = defend_shot(rng, level)
+            defending = 0 if ball["vel"][1] < 0 else 1
+            keeper = cars[0] if defending == 0 else cars[2]
+            point = crossing_point(predictor.predict(ball["pos"], ball["vel"], ball["ang_vel"]), defending)
+            speeds.append(np.linalg.norm(ball["vel"]))
+            if point is not None:
+                misses.append(abs(point[0] - keeper["pos"][0]))
+        return np.median(speeds), np.median(misses)
+
+    easy, hard = stats(0.0), stats(1.0)
+    assert easy[0] < 0.8 * hard[0]  # slower (longer flights need more upward speed, so not by the flight-time ratio)
+    assert easy[1] < 250 < hard[1]  # aimed at the keeper rather than anywhere in the goal mouth
+
+
+def test_practice_end_feeds_the_curriculum():
+    from types import SimpleNamespace as NS
+
+    from playstyle.states import PracticeEnd, ShotCurriculum
+
+    def game(tick, goal=False, ball_y=0.0, touches=(0, 0, 0, 0)):
+        cars = {a: NS(team_num=t, ball_touches=n) for a, t, n in zip(("b0", "b1", "o0", "o1"), (0, 0, 1, 1), touches)}
+        return NS(tick_count=tick, goal_scored=goal, scoring_team=1 if goal else None, cars=cars,
+                  ball=NS(linear_velocity=np.array([0.0, -2000.0, 0.0]), position=np.array([0.0, ball_y, 300.0])))
+
+    agents = ["b0", "b1", "o0", "o1"]
+    shot = {"ball_slices": np.tile([0.0, -5300.0, 300.0], (31, 1)), "start": "defend_shot"}
+    away = {**shot, "ball_slices": np.tile([0.0, -2000.0, 300.0], (31, 1))}
+    curriculum = ShotCurriculum()
+    end = PracticeEnd(curriculum)
+    for info, g, expect in ((away, game(8, touches=(1, 0, 0, 0)), [True]),
+                            (shot, game(8, goal=True), [True, False]),
+                            (shot, game(10_000), [True, False])):  # timeout: not counted
+        end.reset(agents, game(0), shot)
+        assert all(end.is_done(agents, g, info).values())
+        assert curriculum.results == expect
 
 
 def test_apply_state_sets_conservative_jump_state():

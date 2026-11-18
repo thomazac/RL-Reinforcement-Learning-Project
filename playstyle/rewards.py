@@ -11,7 +11,7 @@ import numpy as np
 from rlgym.api import RewardFunction
 
 from .ball_prediction import SLICE_TIMES, TICK_RATE
-from .roles import FIRST
+from .roles import FIRST, SECOND
 
 CAR_MAX_SPEED = 2300.0
 
@@ -89,6 +89,15 @@ PHASE_1B_TERMS = {
     "double_commit": ONE_SIDED,  # 1 per step charged to this car (playstyle/coordination.py), plus revoked steps
     "nobody_challenging": ONE_SIDED,  # 1 per step charged to this car (the first man)
     "nobody_home": ONE_SIDED,  # 1 per step for both teammates while their net is empty
+    "rotation": ONE_SIDED,  # second man only: 1 in his rotation spot, else speed toward it / CAR_MAX_SPEED (rotation_spot)
+    # Partial credit in practice (defend_shot) episodes only, while the ball is on course for the own net:
+    "path_approach": ONE_SIDED,  # defender speed toward the shot's goal-line crossing point / CAR_MAX_SPEED
+    "shot_touch": ONE_SIDED,  # 1: a defender's new contact with a ball on course for its net, stopped or not
+    # Logged only (weight 0):
+    "practice_shot": ONE_SIDED,  # 1 for each defender on the first step of a practice episode
+    "practice_defended": ONE_SIDED,  # 1: a defender's touch took a practice shot off course (what ends it as defended)
+    "practice_level": ONE_SIDED,  # 1 + the shot curriculum level, for defenders on every practice step
+    "both_near": ONE_SIDED,  # 1 for both teammates while both are within NEAR_BALL of the ball
     "goal": ZERO_SUM,  # 1 on the step the team scores
     "concede": ZERO_SUM,  # 1 on the step the team concedes
     "ball_to_goal": ZERO_SUM,  # (ball velocity toward the opponent net - toward the own net) / (2 BALL_MAX_SPEED)
@@ -103,9 +112,36 @@ PHASE_1B_TERMS = {
 # After 500M steps saves were still 0.1-0.2 per player per 5 minutes against 1.28 for GC1 humans (same definition),
 # so save went from 1.5 to 3, still well under the concede penalty so letting a shot through never pays; most of the
 # extra saves are meant to come from the defend_shot start states (playstyle/states.py), not the weight.
+# At 900M practice saves were 1% (94% goals, 68% of shots reachable): keepers drove at the ball (91%) rather than
+# at the shot's goal-line crossing point (46%). path_approach and shot_touch give partial credit on the way to a save,
+# in practice episodes only so normal play cannot farm them. rotation is the design doc's second-man reward; nothing
+# positive pulled the second man back before. Weights: rotation from scripts/size_rewards.py on the 1.1B policy (498
+# raw per car per 5 minutes -> 1.0); path_approach ~0.25 per practice shot at a full sprint; shot_touch a third of a
+# save.
 PHASE_1B = {"touch": 0.3, "air_touch": 1.0, "save": 3.0, "clear": 1.0, "shot": 0.0, "boost": 0.15,
             "speed_to_ball": 0.0014, "double_commit": -0.04, "nobody_challenging": -0.2, "nobody_home": -0.0017,
+            "rotation": 0.002, "path_approach": 0.015, "shot_touch": 1.0,
+            "practice_shot": 0.0, "practice_defended": 0.0, "practice_level": 0.0, "both_near": 0.0,
             "goal": 10.0, "concede": -8.0, "ball_to_goal": 0.0055, "win": 10.0}
+NEAR_BALL = 1000.0  # uu, for both_near (human GC1 baseline: scripts/human_baselines.py)
+ROTATION_ARRIVED = 600.0  # uu from the rotation spot counts as in it
+
+
+def rotation_spot(ball_pos, team):
+    """Where the second man should be: on the line from the far post (the post away from the ball's side) toward
+    the ball, deeper the deeper the ball is: 15% of the way out with the ball at his own goal line, 55% with it at the
+    opponent's."""
+    sign = own_goal_sign(team)
+    far_x = -np.sign(ball_pos[0]) * 800.0 if abs(ball_pos[0]) > 300 else 0.0
+    post = np.array([far_x, sign * (GOAL_Y - 300)])
+    progress = (-sign * ball_pos[1] + GOAL_Y) / (2 * GOAL_Y)  # 0 at the own goal line, 1 at the opponent's
+    return post + (0.15 + 0.4 * np.clip(progress, 0, 1)) * (np.asarray(ball_pos[:2]) - post)
+
+
+def crossing_point(slices, team):
+    """Where the predicted ball path first crosses team's goal line (x, y), or None."""
+    behind = np.flatnonzero(slices[:, 1] * own_goal_sign(team) > GOAL_Y)
+    return slices[behind[0], :2] if len(behind) else None
 
 
 def own_goal_sign(team) -> float:
@@ -161,6 +197,8 @@ class Phase1bReward(RewardFunction):
         self.in_contact = {a: False for a in agents}
         self.last_paid = {a: -10**9 for a in agents}
         self.field_reset_next = False
+        self.practice = shared_info.get("start") == "defend_shot"
+        self.practice_first_step = self.practice
 
     def _raw(self, agents, state, shared_info):
         idx = {n: i for i, n in enumerate(self.weights)}
@@ -173,6 +211,8 @@ class Phase1bReward(RewardFunction):
         match = shared_info.get("match", {})
         coordination = shared_info.get("coordination", {})
         roles = shared_info.get("roles", {})
+        near = {a: not state.cars[a].is_demoed
+                and float(np.linalg.norm(state.cars[a].physics.position - ball_pos)) < NEAR_BALL for a in agents}
 
         for a in agents:
             car, r = state.cars[a], raw[a]
@@ -180,6 +220,26 @@ class Phase1bReward(RewardFunction):
             touching = car.ball_touches > 0
             if not car.is_demoed and roles.get(a) == FIRST:
                 r[idx["speed_to_ball"]] = components(car, state.ball)[1]
+            if not car.is_demoed and roles.get(a) == SECOND:
+                to_spot = rotation_spot(ball_pos, team) - car.physics.position[:2]
+                dist = float(np.linalg.norm(to_spot))
+                r[idx["rotation"]] = 1.0 if dist < ROTATION_ARRIVED else \
+                    max(0.0, float(car.physics.linear_velocity[:2] @ to_spot) / dist) / CAR_MAX_SPEED
+            mates = [b for b in agents if state.cars[b].team_num == team]
+            r[idx["both_near"]] = float(all(near[b] for b in mates))
+            if self.practice and enters_net(self.prev_slices, team, SHOT_HORIZON):
+                if self.practice_first_step:
+                    r[idx["practice_shot"]] = 1.0
+                r[idx["practice_level"]] = 1.0 + float(shared_info.get("practice_level", 0.0))
+                point = crossing_point(slices, team)
+                if point is not None and not car.is_demoed:
+                    to_point = point - car.physics.position[:2]
+                    r[idx["path_approach"]] = max(0.0, float(car.physics.linear_velocity[:2] @ to_point)
+                                                  / max(float(np.linalg.norm(to_point)), 1e-6)) / CAR_MAX_SPEED
+                if touching and not self.in_contact[a] and not field_reset:
+                    r[idx["shot_touch"]] = 1.0
+                    if not enters_net(slices, team, SHOT_HORIZON):
+                        r[idx["practice_defended"]] = 1.0
             if touching and not field_reset:
                 new_contact = not self.in_contact[a]
                 if new_contact and state.tick_count - self.last_paid[a] >= TOUCH_COOLDOWN_TICKS:
@@ -219,6 +279,7 @@ class Phase1bReward(RewardFunction):
 
         self.prev_ball_vel, self.prev_ball_pos, self.prev_slices = ball_vel, ball_pos, slices
         self.field_reset_next = bool(state.goal_scored)  # the engine resets to kickoff on the next step
+        self.practice_first_step = False
         return raw
 
     def get_rewards(self, agents, state, is_terminated, is_truncated, shared_info):

@@ -27,7 +27,7 @@ from playstyle.ball_prediction import SLICE_TIMES
 from playstyle.env import REPLAY_STATES, TICK_SKIP, build_env
 from playstyle.match import TICK_RATE
 from playstyle.rewards import SHOT_HORIZON, enters_net
-from playstyle.states import MixedStart
+from playstyle.states import MixedStart, ShotCurriculum
 
 WINDOW = 8.0
 DT = TICK_SKIP / TICK_RATE
@@ -41,15 +41,23 @@ def main():
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--shots", type=int, default=300)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--level", type=float, default=1.0,
+                    help="shot difficulty (playstyle.states.defend_shot); 1 is the full range, as in earlier evals")
     args = ap.parse_args()
 
     actor = load_policy(args.checkpoint, "cuda" if torch.cuda.is_available() else "cpu")
     env = build_env(phase="1b")
     mutators = list(env.state_mutator.mutators)
-    mutators[1] = MixedStart(env.transition_engine.kickoff, REPLAY_STATES, seed=args.seed, weights={"defend_shot": 1.0})
+    mutators[1] = MixedStart(env.transition_engine.kickoff, REPLAY_STATES, seed=args.seed, weights={"defend_shot": 1.0},
+                             curriculum=ShotCurriculum(level=args.level))
     env.state_mutator.mutators = tuple(mutators)
-    save_i = env.reward_fn.names.index("save")
-    outcomes, keeper_stats, reachable = Counter(), [], []
+    names = env.reward_fn.names
+    save_i = names.index("save")
+    penalties = ("double_commit", "nobody_challenging", "nobody_home")
+    penalty_steps = {(p, who): 0 for p in penalties for who in ("keeper", "other defender")}
+    shots_with = Counter()
+    outcomes, keeper_stats, reachable, toward_path = Counter(), [], [], []
+    total_steps = 0
     for _ in range(args.shots):
         obs = env.reset()
         state = env.state
@@ -65,6 +73,9 @@ def main():
         crossing = np.flatnonzero(slices[:, 1] * sign > 5120)
         arrival = float(SLICE_TIMES[crossing[0]]) if len(crossing) else np.inf
         reachable.append(float(env.shared_info["ttb"][keeper]) < arrival)
+        cross_point = slices[crossing[0], :2] if len(crossing) else own_goal[:2]
+        start_keeper = state.cars[keeper].physics.position[:2].copy()
+        fired = set()
         outcome, closest, moved, jumped, touched, defender_touched = None, start_dist, None, False, False, False
         for step in range(int(WINDOW / DT)):
             with torch.no_grad():
@@ -74,8 +85,17 @@ def main():
             k = state.cars[keeper]
             d = float(np.linalg.norm(k.physics.position - state.ball.position))
             closest = min(closest, d)
+            total_steps += 1
+            for a in defenders:
+                who = "keeper" if a == keeper else "other defender"
+                for p in penalties:
+                    if rewards[a][1 + names.index(p)] != 0:
+                        penalty_steps[(p, who)] += 1
+                        fired.add((p, who))
             if moved is None and (step + 1) * DT >= 1.0:
                 moved = d < start_dist - 100
+                before = np.linalg.norm(start_keeper - cross_point)
+                toward_path.append(np.linalg.norm(k.physics.position[:2] - cross_point) < before - 100)
             jumped |= not k.on_ground
             touched |= k.ball_touches > 0
             if any(rewards[a][1 + save_i] > 0 for a in defenders):
@@ -95,6 +115,8 @@ def main():
         if outcome is None:
             outcome = "defended" if defender_touched else "unresolved"
         outcomes[outcome] += 1
+        for f in fired:
+            shots_with[f] += 1
         keeper_stats.append((start_dist, closest, bool(moved), jumped, touched, on_target, outcome))
 
     n = sum(outcomes.values())
@@ -106,6 +128,18 @@ def main():
     print(f"keeper: start {np.median(ks[:, 0]):.0f} uu from the ball, closest approach median {np.median(ks[:, 1]):.0f} uu; "
           f"moved toward the ball in the first second {ks[:, 2].mean():.0%}; jumped {ks[:, 3].mean():.0%}; "
           f"touched the ball {ks[:, 4].mean():.0%}")
+    print("coordination penalties on defenders during practice shots (share of shots where it fired at least once; "
+          "share of defender-steps):")
+    for (p, who), steps in penalty_steps.items():
+        print(f"  {p:20s} {who:15s} {shots_with[(p, who)] / n:5.1%} of shots, {steps / total_steps:5.1%} of steps")
+    reach = np.array(reachable, dtype=bool)
+    failed = np.array([r[6] == "goal" for r in keeper_stats]) & reach
+    if failed.any():
+        fk = np.array([r[:5] for r in keeper_stats], dtype=float)[failed]
+        path = np.array(toward_path + [False] * (len(keeper_stats) - len(toward_path)), dtype=bool)[failed]
+        print(f"failed reachable shots ({failed.sum()}): keeper moved toward the ball {fk[:, 2].mean():.0%}, toward the "
+              f"shot's goal-line crossing point {path.mean():.0%}, jumped {fk[:, 3].mean():.0%}, touched {fk[:, 4].mean():.0%}, "
+              f"closest approach median {np.median(fk[:, 1]):.0f} uu")
     for name in ("goal", "save", "defended"):
         rows = [r for r in keeper_stats if r[6] == name]
         if rows:
