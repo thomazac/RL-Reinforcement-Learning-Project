@@ -34,7 +34,10 @@ STAGES_1C = [
     {"until": 4_000_000_000, "core_scale": 0.25, "gamma": 0.995, "team_spirit": 0.8},
 ]
 # Full opponent subtraction: at 0.25, crowding rose from 12% to ~16% within 50M steps in two runs (phase1b-5, -6).
-COMMON = ["--phase", "1b", "--opponent-scale", "1.0", "--ent-coef", "0.003", "--save-every", "10000000"]
+# Practice shots at 30% of episodes: at 80% the run lost 0.6-0.8 goals per match to phase1b-3; a 30% branch beat it
+# (+0.41) and the 80% control (+0.60) while keeping most practice-save skill (round robin, 200 matches per pair).
+COMMON = ["--phase", "1b", "--opponent-scale", "1.0", "--ent-coef", "0.003", "--save-every", "10000000",
+          "--practice-share", "0.3"]
 FIRST_WARMUP, STAGE_WARMUP = 10, 5  # critic-only iterations at the start of the run / of each later stage
 
 
