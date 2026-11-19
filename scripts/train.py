@@ -102,7 +102,7 @@ def main():
     ap.add_argument("--procs", type=int, default=32)
     ap.add_argument("--width", type=int, default=256, choices=(128, 256))
     ap.add_argument("--precision", default="float16", choices=("float16", "float32"))
-    ap.add_argument("--phase", default="1a", choices=("1a", "1b"),
+    ap.add_argument("--phase", default="1a", choices=("1a", "1b", "nx"),
                     help="1b: Phase 1b reward (playstyle.rewards.PHASE_1B), coordination on, mixed start states")
     ap.add_argument("--lr", type=float, help="default 2e-4 in Phase 1a, 1e-4 in 1b")
     ap.add_argument("--gamma", type=float, default=0.99)
@@ -110,7 +110,7 @@ def main():
     ap.add_argument("--team-spirit", type=float, help="default 0 in Phase 1a, 0.4 in 1b (the first 500M ran at 0.2)")
     ap.add_argument("--opponent-scale", type=float, default=1.0)
     ap.add_argument("--practice-share", type=float,
-                    help="Phase 1b: share of episode starts that are practice shots (default playstyle.states."
+                    help="Phase 1b and nx: share of episode starts that are practice shots (default playstyle.states."
                          "START_WEIGHTS, 0.8); whole-match starts keep their proportions")
     ap.add_argument("--weight", action="append", default=[], metavar="NAME=VALUE",
                     help="override one reward weight, e.g. --weight shot_path=0 (repeatable; applied after --core-scale)")
@@ -141,6 +141,7 @@ def main():
     from playstyle.network import N_ACTIONS
     from playstyle.obs import OBS_DIM
     from playstyle.rewards import PHASE_1A, PHASE_1B, scaled_core
+    from playstyle.rewards_nx import CORE_TERMS_NX, PHASE_NX
     from playstyle.states import START_WEIGHTS, start_weights
     from playstyle.training import CONTROLLER, NETWORKS, RunLogger, make_agent_controller, make_config
 
@@ -154,7 +155,12 @@ def main():
     if done >= stop:
         raise SystemExit(f"{done:,} steps already done, nothing to do before {stop:,}")
 
-    weights = dict(PHASE_1A) if args.phase == "1a" else scaled_core(PHASE_1B, args.core_scale)
+    if args.phase == "1a":
+        weights = dict(PHASE_1A)
+    elif args.phase == "1b":
+        weights = scaled_core(PHASE_1B, args.core_scale)
+    else:  # nx: playstyle.rewards_nx, Necto-style potentials
+        weights = scaled_core(PHASE_NX, args.core_scale, CORE_TERMS_NX)
     for override in args.weight:
         name, value = override.split("=")
         if name not in weights:
@@ -162,7 +168,8 @@ def main():
         weights[name] = float(value)
     starts = START_WEIGHTS if args.practice_share is None else start_weights(args.practice_share)
     env_fn = functools.partial(build_env, weights=weights, team_spirit=args.team_spirit,
-                               opponent_scale=args.opponent_scale, phase=args.phase, start_weights=starts)
+                               opponent_scale=args.opponent_scale, phase=args.phase, start_weights=starts,
+                               gamma=args.gamma)
     if args.init_from and resume:
         raise SystemExit("--init-from starts a new run; use --resume to carry on an existing one")
     controller = make_agent_controller(width=args.width, precision=args.precision,
@@ -180,8 +187,8 @@ def main():
         "started": time.strftime("%Y-%m-%d %H:%M:%S"), "args": vars(args), "steps_done_at_start": done,
         "resume_from": str(resume) if resume else None, "init_from": args.init_from,
         "reward": {"phase": args.phase, "core_scale": args.core_scale, "weights": weights, "team_spirit": args.team_spirit,
-                   "opponent_scale": args.opponent_scale, "coordination": args.phase == "1b", "reward_ttb": "v1"},
-        "start_states": starts if args.phase == "1b" else "kickoff",
+                   "opponent_scale": args.opponent_scale, "coordination": args.phase != "1a", "reward_ttb": "v1"},
+        "start_states": starts if args.phase != "1a" else "kickoff",
         "network": {"width": args.width, **NETWORKS[args.width], "obs_dim": OBS_DIM, "actions": N_ACTIONS},
         "versions": {"obs": versions.OBS_VERSIONS, "reward": versions.reward_versions("v1")},
         "git": git_state(),

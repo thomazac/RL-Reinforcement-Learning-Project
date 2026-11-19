@@ -129,9 +129,9 @@ PHASE_1B = {"touch": 0.3, "air_touch": 1.0, "save": 3.0, "clear": 1.0, "shot": 0
 CORE_TERMS = ("touch", "air_touch", "speed_to_ball", "boost", "clear", "path_approach", "shot_touch")
 
 
-def scaled_core(weights, scale):
-    """weights with every CORE_TERMS weight multiplied by scale."""
-    return {n: w * scale if n in CORE_TERMS else w for n, w in weights.items()}
+def scaled_core(weights, scale, core=CORE_TERMS):
+    """weights with every core term's weight (CORE_TERMS by default) multiplied by scale."""
+    return {n: w * scale if n in core else w for n, w in weights.items()}
 
 
 NEAR_BALL = 1000.0  # uu, for both_near (human GC1 baseline: scripts/human_baselines.py)

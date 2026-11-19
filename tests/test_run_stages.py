@@ -26,6 +26,9 @@ def test_commands_start_from_init_then_resume_with_each_stages_settings():
                         ("--critic-warmup", "5"), ("--steps", "4000000000"), ("--opponent-scale", "1.0")):
         assert later[later.index(flag) + 1] == value, flag
     assert "--critic-warmup" not in command("r", STAGES_1C, 1, 1_300_000_000, "ckpt", 250_000_000, 0)
+    assert later[later.index("--phase") + 1] == "1b"  # the default reward
+    nx = command("r", STAGES_1C, 1, 1_000_000_000, "ckpt", 250_000_000, 5, phase="nx")
+    assert nx[nx.index("--phase") + 1] == "nx"
 
 
 def test_steps_done_reads_the_newest_checkpoint(tmp_path):

@@ -36,8 +36,7 @@ STAGES_1C = [
 # Full opponent subtraction: at 0.25, crowding rose from 12% to ~16% within 50M steps in two runs (phase1b-5, -6).
 # Practice shots at 30% of episodes: at 80% the run lost 0.6-0.8 goals per match to phase1b-3; a 30% branch beat it
 # (+0.41) and the 80% control (+0.60) while keeping most practice-save skill (round robin, 200 matches per pair).
-COMMON = ["--phase", "1b", "--opponent-scale", "1.0", "--ent-coef", "0.003", "--save-every", "10000000",
-          "--practice-share", "0.3"]
+COMMON = ["--opponent-scale", "1.0", "--ent-coef", "0.003", "--save-every", "10000000", "--practice-share", "0.3"]
 FIRST_WARMUP, STAGE_WARMUP = 10, 5  # critic-only iterations at the start of the run / of each later stage
 
 
@@ -51,9 +50,9 @@ def stage_index(stages, done):
     return next((i for i, s in enumerate(stages) if s["until"] > done), None)
 
 
-def command(run, stages, i, done, init_from, keep_every, warmup):
+def command(run, stages, i, done, init_from, keep_every, warmup, phase="1b"):
     s = stages[i]
-    cmd = [PYTHON, str(ROOT / "scripts" / "train.py"), "--run", run, "--steps", str(stages[-1]["until"]),
+    cmd = [PYTHON, str(ROOT / "scripts" / "train.py"), "--run", run, "--phase", phase, "--steps", str(stages[-1]["until"]),
            "--stop-at", str(s["until"]), "--keep-every", str(keep_every), "--core-scale", str(s["core_scale"]),
            "--gamma", str(s["gamma"]), "--team-spirit", str(s["team_spirit"]), *COMMON]
     if done == 0:
@@ -119,6 +118,8 @@ def main():
     ap.add_argument("--init-from", help="checkpoint to start from when the run has no checkpoints yet")
     ap.add_argument("--keep-every", type=int, default=250_000_000)
     ap.add_argument("--max-restarts", type=int, default=5)
+    ap.add_argument("--phase", default="1b", choices=("1b", "nx"),
+                    help="reward: 1b = playstyle.rewards.Phase1bReward, nx = playstyle.rewards_nx.NextoStyleReward")
     args = ap.parse_args()
 
     run_dir = ROOT / "runs" / "train" / args.run
@@ -147,7 +148,7 @@ def main():
         # it resumes the same stage after a crash.
         warmup = STAGE_WARMUP if done > 0 and i > 0 and (previous is None or previous != i) \
             and done < stages[i - 1]["until"] + 20_000_000 else 0
-        cmd = command(args.run, stages, i, done, args.init_from, args.keep_every, warmup)
+        cmd = command(args.run, stages, i, done, args.init_from, args.keep_every, warmup, args.phase)
         log(f"stage {i + 1}/{len(stages)} from {done:,} steps: {' '.join(cmd[2:])}")
         code = subprocess.run(cmd, cwd=ROOT).returncode
         after = steps_done(run_dir)
