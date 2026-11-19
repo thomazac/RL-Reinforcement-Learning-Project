@@ -165,9 +165,17 @@ class GraphedSampler:
                 self._forward(obs)
         torch.cuda.current_stream().wait_stream(side)
         graph = torch.cuda.CUDAGraph()
-        with torch.no_grad(), torch.cuda.graph(graph, pool=self.pool):
+        # thread_local: CUDA calls from other threads (the overlapped update) do not invalidate the capture.
+        with torch.no_grad(), torch.cuda.graph(graph, pool=self.pool, capture_error_mode="thread_local"):
             action, log_prob = self._forward(obs)
         return graph, obs, action, log_prob
+
+    def capture_all(self):
+        """Capture every size now. Lazily, a size first seen while the update runs on another thread is captured
+        concurrently with it, which failed a resumed run (cudaErrorStreamCaptureInvalidated)."""
+        for size in self.SIZES:
+            if size not in self.graphs:
+                self.graphs[size] = self._capture(size)
 
     def __call__(self, obs_list):
         n = len(obs_list)

@@ -40,7 +40,9 @@ def git_state():
 
 
 def checkpoints(run_dir):
-    folders = sorted(run_dir.glob("checkpoints/*/*/*/ppo_agent.json"), key=lambda p: int(p.parent.name))
+    """Complete checkpoints, oldest first. resume_state.json is written last, after a successful save, so a folder
+    without it is a save that failed partway (an error-save after a CUDA failure left one)."""
+    folders = sorted(run_dir.glob("checkpoints/*/*/*/resume_state.json"), key=lambda p: int(p.parent.name))
     return [p.parent for p in folders]
 
 

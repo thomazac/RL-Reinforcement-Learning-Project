@@ -192,6 +192,19 @@ def test_graphed_sampling_matches_eager(obs, width_kw):
     assert (log_probs - exact.view(-1).cpu()).abs().max() < 1e-6
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a GPU")
+def test_capture_all_covers_every_size_and_samples_correctly(obs):
+    actor = EntityActor(device="cuda")
+    actor.sampler.capture_all()
+    assert set(actor.sampler.graphs) == set(actor.sampler.SIZES)
+    eager = EntityActor(device="cuda", graphs=False)
+    eager.load_state_dict(actor.state_dict())
+    with torch.no_grad():
+        actions, log_probs = actor.get_action(None, [o.numpy() for o in obs[:40]])
+        exact = torch.log_softmax(eager.logits(obs[:40].cuda()), -1).gather(-1, torch.as_tensor(actions).cuda())
+    assert (log_probs - exact.view(-1).cpu()).abs().max() < 1e-6
+
+
 def test_every_parameter_gets_a_gradient(obs):
     torch.manual_seed(3)
     actor, critic = EntityActor(), EntityCritic()

@@ -180,7 +180,12 @@ class ExperienceBuffer(NumpyExperienceBuffer):
 def resources():
     """Memory of this process, of the env processes (its children) and of the GPU, in GB."""
     me = psutil.Process()
-    children = sum(c.memory_info().rss for c in me.children(recursive=True) if c.is_running())
+    children = 0
+    for c in me.children(recursive=True):
+        try:  # a child can exit while being read (the full-game recorder did, and stopped a run at 103M)
+            children += c.memory_info().rss
+        except psutil.Error:
+            pass
     return {"Main Process GB": me.memory_info().rss / 2**30, "Env Processes GB": children / 2**30,
             "GPU Allocated GB": torch.cuda.memory_allocated() / 2**30 if torch.cuda.is_available() else 0.0,
             "GPU Reserved GB": torch.cuda.memory_reserved() / 2**30 if torch.cuda.is_available() else 0.0}
@@ -459,6 +464,9 @@ class OverlappedController(PPOAgentController):
             self.inference_actor = self.actor_factory(self.obs_space, self.action_space, device)
             self.inference_actor.requires_grad_(False)
             self._sync_inference()
+            if self.inference_actor.sampler is not None:
+                with torch.cuda.stream(self.stream):
+                    self.inference_actor.sampler.capture_all()  # before any update thread exists
 
     def _sync_inference(self):
         self.stream.wait_stream(torch.cuda.default_stream(self.stream.device))
