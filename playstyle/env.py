@@ -35,11 +35,12 @@ def make_env(team_size=2, obs_builder=None, reward_fn=None, reward_ttb="v1", coo
     start = kickoff
     truncation = [NoTouchTimeoutCondition(NO_TOUCH_SECONDS), TimeoutCondition(MAX_EPISODE_SECONDS)]
     if mixed_starts:
-        curriculum = ShotCurriculum(level=0.0)  # shared: starts set the level, practice endings feed it outcomes
+        # Shared: starts set the levels, practice endings feed them outcomes.
+        curriculum, aerial_curriculum = ShotCurriculum(level=0.0), ShotCurriculum(level=0.0)
         start = MixedStart(kickoff, REPLAY_STATES if REPLAY_STATES.exists() else None,
                            seed=None if seed is None else [seed, 1],  # its own stream, apart from RandomMatchStart's
-                           weights=start_weights, curriculum=curriculum)
-        truncation.append(PracticeEnd(curriculum))
+                           weights=start_weights, curriculum=curriculum, aerial_curriculum=aerial_curriculum)
+        truncation.append(PracticeEnd(curriculum, aerial_curriculum))
     return RLGym(
         state_mutator=MutatorSequence(FixedTeamSizeMutator(team_size, team_size), start, RandomMatchStart(seed)),
         obs_builder=obs_builder or EntityObs(),

@@ -165,7 +165,10 @@ def test_practice_episodes_end_when_the_play_resolves():
 def test_start_weights_set_the_practice_share_and_keep_match_proportions():
     from playstyle.states import start_weights
     w = start_weights(0.3)
-    assert w["defend_shot"] == 0.3 and sum(w.values()) == pytest.approx(1.0)
+    assert w["defend_shot"] == 0.3 and w["aerial"] == 0.0 and sum(w.values()) == pytest.approx(1.0)
+    assert w["replay"] / w["kickoff"] == pytest.approx(START_WEIGHTS["replay"] / START_WEIGHTS["kickoff"])
+    w = start_weights(0.3, 0.25)
+    assert w["aerial"] == 0.25 and sum(w.values()) == pytest.approx(1.0)
     assert w["replay"] / w["kickoff"] == pytest.approx(START_WEIGHTS["replay"] / START_WEIGHTS["kickoff"])
 
 
@@ -226,6 +229,56 @@ def test_practice_end_feeds_the_curriculum():
                             (shot, game(10_000), [True, False])):  # timeout: not counted
         end.reset(agents, game(0), shot)
         assert all(end.is_done(agents, g, info).values())
+        assert curriculum.results == expect
+
+
+def test_aerial_states_put_the_ball_out_of_jump_reach_ahead_of_the_nearest_car():
+    from playstyle.states import AERIAL_MIN_Z, aerial
+    rng = np.random.default_rng(4)
+    for level in (0.0, 1.0):
+        valid = 0
+        for _ in range(300):
+            ball, cars = aerial(rng, level)
+            if not state_is_valid(ball, cars):
+                continue
+            valid += 1
+            d = [np.linalg.norm(c["pos"][:2] - ball["pos"][:2]) for c in cars]
+            near = int(np.argmin(d))
+            attack = 1 if near < 2 else -1  # blue attacks +y; after mirroring, orange attacks -y
+            assert ball["pos"][2] >= AERIAL_MIN_Z and ball["vel"][2] >= 0 and cars[near]["boost"] >= 40
+            assert (ball["pos"][1] - cars[near]["pos"][1]) * attack > 0  # the ball is ahead, toward the opponent net
+            assert sorted(d)[1] > d[near] + 600  # nobody else is close
+        assert valid > 150, level
+    low = [aerial(rng, 0.0)[0]["pos"][2] for _ in range(200)]
+    high = [aerial(rng, 1.0)[0]["pos"][2] for _ in range(200)]
+    assert max(low) <= 550 and 800 < np.median(high)
+
+
+def test_aerial_practice_ends_on_a_touch_a_low_ball_or_the_timeout_and_feeds_its_curriculum():
+    from types import SimpleNamespace as NS
+
+    from playstyle.states import AERIAL_SECONDS, PracticeEnd, ShotCurriculum
+
+    def game(tick, ball_z=800.0, touches=(0, 0, 0, 0), airborne=True):
+        cars = {a: NS(team_num=t, ball_touches=n, on_ground=not airborne,
+                      physics=NS(position=np.array([0.0, p, 17.0])))
+                for a, t, n, p in zip(("b0", "b1", "o0", "o1"), (0, 0, 1, 1), touches, (-500, -4000, 4000, 4500))}
+        return NS(tick_count=tick, goal_scored=False, scoring_team=None, cars=cars,
+                  ball=NS(position=np.array([0.0, 0.0, ball_z]), linear_velocity=np.zeros(3)))
+
+    agents, info = ["b0", "b1", "o0", "o1"], {"start": "aerial", "ball_slices": np.zeros((31, 3))}
+    curriculum = ShotCurriculum()
+    end = PracticeEnd(aerial_curriculum=curriculum)
+    for g, done, expect in ((game(8), False, []),
+                            (game(8, touches=(1, 0, 0, 0)), True, [True]),  # airborne touch by the practicing team
+                            (game(8, touches=(1, 0, 0, 0), airborne=False), True, [False]),  # jumped too late
+                            (game(8, touches=(0, 0, 1, 0)), True, [False]),  # an opponent got there first
+                            (game(8, ball_z=300.0), True, [False]),  # the ball dropped out of aerial height
+                            (game(8, ball_z=300.0, touches=(1, 0, 0, 0)), True, [False]),  # a jump touch, not an aerial
+                            (game(int(AERIAL_SECONDS * 120)), True, [])):  # timeout: not counted
+        curriculum.results.clear()
+        end.reset(agents, game(0), info)
+        assert all(end.is_done(agents, g, info).values()) == done
         assert curriculum.results == expect
 
 

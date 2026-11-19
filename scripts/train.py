@@ -112,6 +112,9 @@ def main():
     ap.add_argument("--practice-share", type=float,
                     help="Phase 1b and nx: share of episode starts that are practice shots (default playstyle.states."
                          "START_WEIGHTS, 0.8); whole-match starts keep their proportions")
+    ap.add_argument("--aerial-share", type=float, default=0.0,
+                    help="share of episode starts that are aerial practice (playstyle.states.aerial; reward nx "
+                         "logs it); taken from the whole-match starts")
     ap.add_argument("--weight", action="append", default=[], metavar="NAME=VALUE",
                     help="override one reward weight, e.g. --weight shot_path=0 (repeatable; applied after --core-scale)")
     ap.add_argument("--core-scale", type=float, default=1.0,
@@ -122,7 +125,8 @@ def main():
                     help="also copy the first checkpoint past every multiple of this to runs/train/<run>/kept/")
     ap.add_argument("--video-every", type=int, default=50_000_000,
                     help="record one full match (scripts/watch.py --full-game) from the first checkpoint past every "
-                         "multiple of this, in the background, to runs/train/<run>/games/; 0 turns it off")
+                         "multiple of this, in the background, to runs/train/<run>/games/, and export it as an RLBot "
+                         "bot to runs/train/<run>/rlbot/; 0 turns both off")
     ap.add_argument("--seed", type=int, default=123)
     args = ap.parse_args()
     if args.lr is None:
@@ -166,7 +170,9 @@ def main():
         if name not in weights:
             raise SystemExit(f"--weight: no reward term {name!r}; terms are {list(weights)}")
         weights[name] = float(value)
-    starts = START_WEIGHTS if args.practice_share is None else start_weights(args.practice_share)
+    starts = START_WEIGHTS if args.practice_share is None and not args.aerial_share else \
+        start_weights(START_WEIGHTS["defend_shot"] if args.practice_share is None else args.practice_share,
+                      args.aerial_share)
     env_fn = functools.partial(build_env, weights=weights, team_spirit=args.team_spirit,
                                opponent_scale=args.opponent_scale, phase=args.phase, start_weights=starts,
                                gamma=args.gamma)
@@ -216,6 +222,15 @@ def main():
                              cwd=ROOT, stdout=out, stderr=subprocess.STDOUT)
         print(f"recording a full game to {name.with_suffix('.mp4')}")
 
+    def export_bot(checkpoint, steps):
+        """An RLBot v5 bot folder for this checkpoint (scripts/export_rlbot.py), alongside each game video."""
+        out = run_dir / "rlbot" / f"{steps // 1_000_000}M"
+        out.parent.mkdir(exist_ok=True)
+        with open(out.with_suffix(".log"), "w") as log:
+            subprocess.Popen([sys.executable, str(ROOT / "scripts" / "export_rlbot.py"), "--checkpoint", str(checkpoint),
+                              "--out", str(out)], cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
+        print(f"exporting an RLBot bot to {out}")
+
     def save_with_state():
         save()
         newest = max(Path(controller.checkpoints_save_folder).iterdir(), key=lambda p: int(p.name))
@@ -230,6 +245,7 @@ def main():
         if args.video_every and controller.cumulative_timesteps // args.video_every > kept["video"]:
             kept["video"] = controller.cumulative_timesteps // args.video_every
             record_game(newest, controller.cumulative_timesteps)
+            export_bot(newest, controller.cumulative_timesteps)
 
     controller.save_checkpoint = save_with_state
     coordinator = LearningCoordinator(env_fn, {CONTROLLER: controller}, config)

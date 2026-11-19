@@ -28,15 +28,19 @@ ROOT = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
 
 # Phase 1c (design doc): outcome-dominant, the core shaping layer annealed, gamma raised. Step counts are this run's.
+# Stage 1 runs to 2B: at 750M of phase1c-nx (gold-level play) the bots still did not aerial (their airborne touches
+# were jump touches) and positioning was still improving, so the core shaping stays at full strength longer.
 STAGES_1C = [
-    {"until": 1_000_000_000, "core_scale": 1.0, "gamma": 0.99, "team_spirit": 0.4},
-    {"until": 2_000_000_000, "core_scale": 0.5, "gamma": 0.993, "team_spirit": 0.6},
-    {"until": 4_000_000_000, "core_scale": 0.25, "gamma": 0.995, "team_spirit": 0.8},
+    {"until": 2_000_000_000, "core_scale": 1.0, "gamma": 0.99, "team_spirit": 0.4},
+    {"until": 3_000_000_000, "core_scale": 0.5, "gamma": 0.993, "team_spirit": 0.6},
+    {"until": 5_000_000_000, "core_scale": 0.25, "gamma": 0.995, "team_spirit": 0.8},
 ]
 # Full opponent subtraction: at 0.25, crowding rose from 12% to ~16% within 50M steps in two runs (phase1b-5, -6).
 # Practice shots at 30% of episodes: at 80% the run lost 0.6-0.8 goals per match to phase1b-3; a 30% branch beat it
 # (+0.41) and the 80% control (+0.60) while keeping most practice-save skill (round robin, 200 matches per pair).
-COMMON = ["--opponent-scale", "1.0", "--ent-coef", "0.003", "--save-every", "10000000", "--practice-share", "0.3"]
+# Aerial practice (playstyle.states.aerial) at 25% of episodes, ~1% of steps: drills last at most 4 s.
+COMMON = ["--opponent-scale", "1.0", "--ent-coef", "0.003", "--save-every", "10000000", "--practice-share", "0.3",
+          "--aerial-share", "0.25"]
 FIRST_WARMUP, STAGE_WARMUP = 10, 5  # critic-only iterations at the start of the run / of each later stage
 
 

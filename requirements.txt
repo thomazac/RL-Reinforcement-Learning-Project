@@ -50,6 +50,9 @@ python-dateutil==4.0.0
 python-dotenv==1.2.4
 PyYAML==6.0.3
 requests==2.34.2
+rlbot==2.0.0b57
+rlbot_flatbuffers==0.19.0
+rlgym-compat==2.3.6
 rlgym==2.0.1
 rlgym-api==2.0.0
 rlgym-learn==1.0.5

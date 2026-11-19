@@ -267,6 +267,9 @@ def main():
     ap.add_argument("--no-draw", action="store_true")
     ap.add_argument("--view", choices=("3d", "2d"), default="3d",
                     help="3d: perspective arena view; 2d: top-down with the full coordination overlay")
+    ap.add_argument("--drills", help="with --checkpoint: play only these practice starts, comma-separated "
+                                     "(defend_shot, aerial), back to back, each titled with its kind")
+    ap.add_argument("--drill-level", type=float, default=0.0, help="curriculum level for --drills (0 easy .. 1 hard)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--blue-mode", choices=MODES, default="normal")
     ap.add_argument("--orange-mode", choices=MODES, default="normal")
@@ -279,7 +282,13 @@ def main():
         actor = load_policy(args.checkpoint, "cuda" if torch.cuda.is_available() else "cpu")
     # Trained policies play the env they trained in. Roles are switched on for the overlay; they only add
     # shared-info entries for the reward and overlay, which the observation never reads.
-    env = build_env(coordination=True) if actor is not None else make_env()
+    if args.drills:
+        kinds = args.drills.split(",")
+        env = build_env(phase="nx", start_weights={k: 1 / len(kinds) for k in kinds})
+        starts = env.state_mutator.mutators[1]
+        starts.curriculum.level = starts.aerial_curriculum.level = args.drill_level
+    else:
+        env = build_env(coordination=True) if actor is not None else make_env()
     bot = RoleBot(seed=args.seed, team_modes={0: args.blue_mode, 1: args.orange_mode})
     rng = np.random.default_rng(args.seed)
     obs = env.reset()
@@ -314,6 +323,9 @@ def main():
     while t < args.seconds:
         stats.update(env.state, env.shared_info["roles"], t, reset)
         if ax is not None:
+            if args.drills:
+                fig.suptitle(f"{env.shared_info['start']} drill, level {args.drill_level:g}", x=0.98, y=0.97,
+                             ha="right", fontsize=11)
             if args.view == "3d":
                 view.update(env.state, env.shared_info, t)
             else:

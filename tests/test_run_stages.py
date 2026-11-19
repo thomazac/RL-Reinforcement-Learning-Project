@@ -9,25 +9,26 @@ from run_stages import FIRST_WARMUP, STAGES_1C, command, stage_index, steps_done
 
 def test_stage_index_follows_the_schedule():
     assert stage_index(STAGES_1C, 0) == 0
-    assert stage_index(STAGES_1C, 999_999_999) == 0
-    assert stage_index(STAGES_1C, 1_000_000_000) == 1
-    assert stage_index(STAGES_1C, 2_500_000_000) == 2
-    assert stage_index(STAGES_1C, 4_000_000_000) is None
+    assert stage_index(STAGES_1C, 1_999_999_999) == 0
+    assert stage_index(STAGES_1C, 2_000_000_000) == 1
+    assert stage_index(STAGES_1C, 3_500_000_000) == 2
+    assert stage_index(STAGES_1C, 5_000_000_000) is None
 
 
 def test_commands_start_from_init_then_resume_with_each_stages_settings():
     first = command("r", STAGES_1C, 0, 0, "ckpt", 250_000_000, 0)
     assert first[first.index("--init-from") + 1] == "ckpt"
     assert first[first.index("--critic-warmup") + 1] == str(FIRST_WARMUP) and "--resume" not in first
-    assert first[first.index("--stop-at") + 1] == "1000000000"
-    later = command("r", STAGES_1C, 1, 1_000_000_000, "ckpt", 250_000_000, 5)
+    assert first[first.index("--stop-at") + 1] == "2000000000"
+    later = command("r", STAGES_1C, 1, 2_000_000_000, "ckpt", 250_000_000, 5)
     assert later[later.index("--resume") + 1] == "latest" and "--init-from" not in later
     for flag, value in (("--core-scale", "0.5"), ("--gamma", "0.993"), ("--team-spirit", "0.6"),
-                        ("--critic-warmup", "5"), ("--steps", "4000000000"), ("--opponent-scale", "1.0")):
+                        ("--critic-warmup", "5"), ("--steps", "5000000000"), ("--opponent-scale", "1.0"),
+                        ("--aerial-share", "0.25")):
         assert later[later.index(flag) + 1] == value, flag
-    assert "--critic-warmup" not in command("r", STAGES_1C, 1, 1_300_000_000, "ckpt", 250_000_000, 0)
+    assert "--critic-warmup" not in command("r", STAGES_1C, 1, 2_300_000_000, "ckpt", 250_000_000, 0)
     assert later[later.index("--phase") + 1] == "1b"  # the default reward
-    nx = command("r", STAGES_1C, 1, 1_000_000_000, "ckpt", 250_000_000, 5, phase="nx")
+    nx = command("r", STAGES_1C, 1, 2_000_000_000, "ckpt", 250_000_000, 5, phase="nx")
     assert nx[nx.index("--phase") + 1] == "nx"
 
 

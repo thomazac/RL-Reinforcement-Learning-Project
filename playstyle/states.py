@@ -33,16 +33,21 @@ MAX_CAR_SPIN = 5.5  # rad/s
 # practice was only ~0.6% of steps (0.8 practice shots per 5 minutes of play); 80% of episodes gives ~5-6% of steps,
 # with whole matches still ~95% of training. The whole-match starts keep their relative shares.
 START_WEIGHTS = {"kickoff": 0.055, "replay": 0.077, "random": 0.034, "coord_equidistant": 0.017,
-                 "coord_counter": 0.017, "defend_shot": 0.80}
+                 "coord_counter": 0.017, "defend_shot": 0.80, "aerial": 0.0}
+PRACTICE = ("defend_shot", "aerial")
 PRACTICE_SECONDS = 6.0
+AERIAL_SECONDS = 4.0
+# Ball center (uu): a single jump touch reaches ~350 and a double jump ~500, so above this a touch takes a double
+# jump or boost. Below it a touch is a jump touch, and an aerial drill whose ball drops below it has failed.
+AERIAL_MIN_Z = 450.0
 
 
-def start_weights(practice_share):
-    """START_WEIGHTS with defend_shot at practice_share of episode starts and the whole-match starts scaled to fill
-    the rest in their usual proportions."""
-    others = {k: v for k, v in START_WEIGHTS.items() if k != "defend_shot"}
-    scale = (1 - practice_share) / sum(others.values())
-    return {**{k: v * scale for k, v in others.items()}, "defend_shot": practice_share}
+def start_weights(practice_share, aerial_share=0.0):
+    """START_WEIGHTS with defend_shot at practice_share and aerial at aerial_share of episode starts, and the
+    whole-match starts scaled to fill the rest in their usual proportions."""
+    others = {k: v for k, v in START_WEIGHTS.items() if k not in PRACTICE}
+    scale = (1 - practice_share - aerial_share) / sum(others.values())
+    return {**{k: v * scale for k, v in others.items()}, "defend_shot": practice_share, "aerial": aerial_share}
 GRAVITY = 650.0  # uu/s^2
 
 
@@ -270,8 +275,38 @@ def defend_shot(rng, level=1.0):
     return mirror(ball, cars) if rng.random() < 0.5 else (ball, cars)
 
 
+def aerial(rng, level=1.0):
+    """A ball hanging in the air between one team's car and the opponent net, out of reach of a jump: that car,
+    on the ground with boost and facing it, has to aerial. Its teammate is back in their own half; the opponents
+    start far upfield, so the practice is getting to the ball, not a challenge.
+
+    level (0..1, ShotCurriculum) sets the difficulty: at 0 the ball starts 450-550 uu up and rising (apex 520-700,
+    above AERIAL_MIN_Z for ~1.2 s), in double-jump reach, 400-900 uu ahead of a car at speed with 80-100 boost; at 1
+    it is 800-1600 up, rising at most 500 uu/s, 800-1800 ahead of a car at any speed with 40-100 boost. The phase1c-nx
+    policy at 830M drove under every drill ball and waited for it to drop, so level 0 has to be reachable without
+    boost for the drill to pay anything at all."""
+    ball_xy = np.array([rng.uniform(-2500, 2500), rng.uniform(-2000, 1500)])  # opponents start >= 2500 away
+    pos = np.array([*ball_xy, rng.uniform(_lerp(450, 800, level), _lerp(550, 1600, level))])
+    ball = {"pos": pos, "vel": np.array([*rng.uniform(-300, 300, 2),
+                                         rng.uniform(_lerp(300, 0, level), _lerp(450, 500, level))]),
+            "ang_vel": np.zeros(3)}
+    # Team 0 (blue) attacks +y: the car approaches from the -y side, angled up to 45 degrees off straight.
+    angle = -np.pi / 2 + rng.uniform(-np.pi / 4, np.pi / 4)
+    car_pos = ball_xy + rng.uniform(_lerp(400, 800, level), _lerp(900, 1800, level)) * np.array([np.cos(angle), np.sin(angle)])
+    car = ground_car(car_pos, _facing(car_pos, ball_xy), rng.uniform(_lerp(800, 0, level), 1400),
+                     rng.uniform(_lerp(80, 40, level), 100))
+    mate_pos = (rng.uniform(-3000, 3000), rng.uniform(-4800, min(ball_xy[1] - 2500, -1500)))
+    mate = ground_car(mate_pos, _facing(mate_pos, ball_xy), rng.uniform(0, 1200), rng.uniform(0, 100))
+    opponents = []
+    for _ in range(2):
+        opp = (rng.uniform(-3500, 3500), rng.uniform(min(ball_xy[1] + 2500, 4500), 4800))
+        opponents.append(ground_car(opp, _facing(opp, ball_xy), rng.uniform(0, 800), rng.uniform(0, 100)))
+    cars = [car, mate, *opponents]
+    return mirror(ball, cars) if rng.random() < 0.5 else (ball, cars)
+
+
 GENERATORS = {"random": random_state, "coord_equidistant": coord_equidistant, "coord_counter": coord_counter,
-              "defend_shot": defend_shot}
+              "defend_shot": defend_shot, "aerial": aerial}
 
 
 def state_is_valid(ball, cars):
@@ -300,33 +335,54 @@ class ShotCurriculum:
                 self.results = self.results[-self.WINDOW:]
 
 
-class PracticeEnd(DoneCondition):
-    """Truncation for defend_shot episodes, which are save practice rather than matches: they end once the play
-    resolves (a goal, or a defender touched the ball and it is no longer on course for the net) or after
-    PRACTICE_SECONDS. Truncated, not terminated, so the value bootstraps and nothing learns that a game ends there.
-    Other starts are whole matches and never end here. Outcomes go to the curriculum: defended counts as a success,
-    a goal as a failure; a shot that times out without either is not counted."""
+def aerial_team(state):
+    """The team whose car is nearest the ball: the one practicing in an aerial start."""
+    ball = np.asarray(state.ball.position)
+    car = min(state.cars.values(), key=lambda c: float(np.linalg.norm(np.asarray(c.physics.position) - ball)))
+    return car.team_num
 
-    def __init__(self, curriculum=None):
-        self.curriculum = curriculum
+
+class PracticeEnd(DoneCondition):
+    """Truncation for practice episodes, which are drills rather than matches. Truncated, not terminated, so the
+    value bootstraps and nothing learns that a game ends there. Other starts are whole matches and never end here.
+
+    defend_shot ends once the play resolves (a goal, or a defender touched the ball and it is no longer on course for
+    the net) or after PRACTICE_SECONDS; defended is a success for its curriculum, a goal a failure. aerial ends on the
+    first touch, when the ball drops below AERIAL_MIN_Z, or after AERIAL_SECONDS; an airborne touch by the practicing
+    team with the ball still above AERIAL_MIN_Z is a success, anything else but the timeout a failure. A drill that
+    times out is not counted."""
+
+    def __init__(self, curriculum=None, aerial_curriculum=None):
+        self.curricula = {"defend_shot": curriculum, "aerial": aerial_curriculum}
 
     def reset(self, agents, initial_state, shared_info):
-        self.active = shared_info.get("start") == "defend_shot"
+        self.kind = shared_info.get("start") if shared_info.get("start") in PRACTICE else None
         self.start_tick = initial_state.tick_count
-        self.defending = 0 if initial_state.ball.linear_velocity[1] < 0 else 1
+        self.team = 0 if initial_state.ball.linear_velocity[1] < 0 else 1  # defend_shot: the defending team
+        if self.kind == "aerial":
+            self.team = aerial_team(initial_state)
 
     def is_done(self, agents, state, shared_info):
-        done = False
-        if self.active:
-            touched = any(c.ball_touches > 0 for c in state.cars.values() if c.team_num == self.defending)
-            defended = touched and not enters_net(np.asarray(shared_info["ball_slices"]), self.defending, SHOT_HORIZON)
-            conceded = bool(state.goal_scored) and state.scoring_team != self.defending
-            done = defended or bool(state.goal_scored) \
-                or (state.tick_count - self.start_tick) / TICK_RATE >= PRACTICE_SECONDS
-            if done:
-                if self.curriculum is not None and (defended or conceded):
-                    self.curriculum.record(defended)
-                self.active = False
+        done, result = False, None
+        elapsed = (state.tick_count - self.start_tick) / TICK_RATE
+        if self.kind == "defend_shot":
+            touched = any(c.ball_touches > 0 for c in state.cars.values() if c.team_num == self.team)
+            defended = touched and not enters_net(np.asarray(shared_info["ball_slices"]), self.team, SHOT_HORIZON)
+            conceded = bool(state.goal_scored) and state.scoring_team != self.team
+            done = defended or bool(state.goal_scored) or elapsed >= PRACTICE_SECONDS
+            result = defended if defended or conceded else None
+        elif self.kind == "aerial":
+            touches = [c for c in state.cars.values() if c.ball_touches > 0]
+            high = float(state.ball.position[2]) >= AERIAL_MIN_Z
+            hit = high and any(c.team_num == self.team and not c.on_ground for c in touches)
+            failed = bool(touches) or bool(state.goal_scored) or not high
+            done = hit or failed or elapsed >= AERIAL_SECONDS
+            result = True if hit else False if failed else None
+        if done:
+            curriculum = self.curricula[self.kind]
+            if curriculum is not None and result is not None:
+                curriculum.record(result)
+            self.kind = None
         return {a: done for a in agents}
 
 
@@ -335,9 +391,10 @@ class MixedStart(StateMutator):
     realistic state or a coordination test, by START_WEIGHTS. Generated states are redrawn until valid (replay
     states were validated at extraction). The choice goes to shared_info["start"]."""
 
-    def __init__(self, kickoff, replay_path=None, seed=None, weights=None, curriculum=None):
+    def __init__(self, kickoff, replay_path=None, seed=None, weights=None, curriculum=None, aerial_curriculum=None):
         self.kickoff = kickoff
         self.curriculum = curriculum or ShotCurriculum(level=1.0)
+        self.aerial_curriculum = aerial_curriculum or ShotCurriculum(level=1.0)
         self.rng = np.random.default_rng(seed)
         self.replays = ReplayStates(replay_path) if replay_path else None
         w = dict(START_WEIGHTS if weights is None else weights)
@@ -354,11 +411,15 @@ class MixedStart(StateMutator):
             return
         if kind == "defend_shot":
             shared_info["practice_level"] = self.curriculum.level
+        if kind == "aerial":
+            shared_info["aerial_level"] = self.aerial_curriculum.level
         for _ in range(100):
             if kind == "replay":
                 ball, cars = self.replays.sample(self.rng)
             elif kind == "defend_shot":
                 ball, cars = defend_shot(self.rng, self.curriculum.level)
+            elif kind == "aerial":
+                ball, cars = aerial(self.rng, self.aerial_curriculum.level)
             else:
                 ball, cars = GENERATORS[kind](self.rng)
             if state_is_valid(ball, cars):

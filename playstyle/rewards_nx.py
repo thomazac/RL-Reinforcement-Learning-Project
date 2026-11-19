@@ -18,7 +18,8 @@ What changes against Phase1bReward (playstyle/rewards.py), and why:
   a goal and a car's respawn after a demo restart the potentials without paying the jump.
 * air_touch uses Necto's height shaping: a cube-root activation of the touch height (the mean of car and ball
   height), squared, so low aerials already pay; touches near a wall pay half. Still paid once per distinct touch,
-  as in Phase 1b, so pushing or dribbling cannot farm it.
+  as in Phase 1b, so pushing or dribbling cannot farm it, and only with the ball above AERIAL_MIN_Z, so jump touches
+  (most of the bots' airborne touches at 750M) earn nothing from it.
 * demo: Necto rewards demolitions. Only the attacker's side is a term here; the opponent subtraction already
   charges the victim's team.
 * boost_spend: Necto's charge for spending boost low to the ground. Logged at weight 0: measured, it cancelled most
@@ -49,6 +50,7 @@ from .rewards import (BALL_MAX_SPEED, CAR_MAX_SPEED, CEILING, CLEAR_HORIZON, GOA
                       SAVE_HORIZON, SHOT_HORIZON, TOUCH_COOLDOWN_TICKS, ZERO_SUM, crossing_point, enters_net, in_third,
                       leaves_third, own_goal_sign, rotation_spot)
 from .roles import FIRST, SECOND
+from .states import AERIAL_MIN_Z, aerial_team
 
 FIELD_X = 4096.0
 CORNER_CUT = 1152.0  # the 45-degree corner walls cut this much off each axis
@@ -56,12 +58,13 @@ GOAL_POINT_Y = GOAL_Y + 440.0  # midway between the goal line and the back of th
 GOAL_POINT_Z = 321.39
 DRIBBLE_HEIGHT = 150.0  # touches around this height are about a car-top dribble
 MAX_DRIVE_SPEED = 1410.0  # top speed without boost: the distance scale for closeness to the ball or a spot
+AERIAL_REACH = 500.0  # uu: aerial_approach's distance scale, about a drill ball's height above a car under it
 GOAL_RATE = 7.8 / 2 / 300  # goals per team per second in these bots' games (phase1b, ~7.8 per 5 min); re-measure per stage
 _K = 25  # goal counts summed in the win-probability model; 0.0105 * 300 s gives a mean of ~3
 
 PHASE_NX_TERMS = {
     "touch": ONE_SIDED,  # hit strength: ball speed change / BALL_MAX_SPEED, once per distinct touch
-    "air_touch": ONE_SIDED,  # on a paid touch with the car airborne: Necto height shaping, halved near walls
+    "air_touch": ONE_SIDED,  # on a paid touch, car airborne, ball above AERIAL_MIN_Z: Necto height shaping, halved near walls
     "save": ONE_SIDED,
     "clear": ONE_SIDED,
     "shot": ONE_SIDED,  # logged only
@@ -79,6 +82,10 @@ PHASE_NX_TERMS = {
     "practice_defended": ONE_SIDED,  # logged only
     "practice_level": ONE_SIDED,  # logged only
     "both_near": ONE_SIDED,  # logged only
+    "aerial_approach": ONE_SIDED,  # aerial drills only: change in the drilled car's exp(-3D distance to ball / AERIAL_REACH)
+    "aerial_shot": ONE_SIDED,  # logged only: 1 for each car of the practicing team on an aerial drill's first step
+    "aerial_hit": ONE_SIDED,  # logged only: an airborne touch by the practicing team in an aerial drill
+    "aerial_level": ONE_SIDED,  # logged only: 1 + the aerial curriculum level, practicing team, every drill step
     "goal": ZERO_SUM,
     "concede": ZERO_SUM,
     "ball_potential": ZERO_SUM,  # change in closeness of the ball to the opponent goal minus to the own goal
@@ -92,18 +99,23 @@ PHASE_NX_TERMS = {
 #     right (challenges, supersonic play) -> 0, logged.
 #   first_potential and rotation_potential (0.5): net ~0 and ~+1.1 (old terms 0.84 and 1.36), swing 19 and 13. Watch
 #     their totals in a run.
-#   demo 2 (+0.4 per 5 min); air_touch 1.0 (2.1, the old one 2.7).
-PHASE_NX = {"touch": 0.3, "air_touch": 1.0, "save": 3.0, "clear": 1.0, "shot": 0.0, "boost": 0.15,
+#   demo 2 (+0.4 per 5 min); air_touch 1.0 (2.1, the old one 2.7), paid almost entirely for jump touches (0.07 per
+#     touch at 750M); with jump touches excluded, 2.0 so a mid-height aerial (~0.6) pays about two strong touches.
+#   aerial_approach 2.0: at 830M the policy drove under every drill ball and waited (0% hits even in double-jump
+#     reach), so drills need partial credit. Driving under the ball takes the potential from ~0.2 to ~0.4, jumping up
+#     to it to ~0.75 and more: ~+0.7 for leaving the ground, about what a hit pays.
+PHASE_NX = {"touch": 0.3, "air_touch": 2.0, "save": 3.0, "clear": 1.0, "shot": 0.0, "boost": 0.15,
             "boost_spend": 0.0, "demo": 2.0, "first_potential": 0.5, "rotation_potential": 0.5,
             "double_commit": -0.04, "nobody_challenging": -0.2, "nobody_home": -0.0017,
             "path_approach": 0.015, "shot_touch": 1.0,
             "practice_shot": 0.0, "practice_defended": 0.0, "practice_level": 0.0, "both_near": 0.0,
+            "aerial_approach": 2.0, "aerial_shot": 0.0, "aerial_hit": 0.0, "aerial_level": 0.0,
             "goal": 10.0, "concede": -8.0, "ball_potential": 0.1, "win_prob": 20.0}
 assert list(PHASE_NX) == list(PHASE_NX_TERMS)
 # Annealed in Phase 1c with the core layer. The potentials for the ball and the win, saves, demos, rotation and the
 # coordination layer are not: potentials telescope, and the rest is the outcome or the team layer.
 CORE_TERMS_NX = ("touch", "air_touch", "boost", "boost_spend", "clear", "first_potential", "path_approach",
-                 "shot_touch")
+                 "shot_touch", "aerial_approach")
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -160,6 +172,13 @@ def rotation_potential(car_pos, ball_pos, team):
     """Closeness to the rotation spot (rewards.rotation_spot), exp(-distance / MAX_DRIVE_SPEED): 0..1."""
     spot = rotation_spot(np.asarray(ball_pos, dtype=np.float64), team)
     return float(np.exp(-np.linalg.norm(spot - np.asarray(car_pos, dtype=np.float64)[:2]) / MAX_DRIVE_SPEED))
+
+
+def aerial_potential(car_pos, ball_pos):
+    """Closeness of a car to the ball in 3D, exp(-distance / AERIAL_REACH): 0..1. Under a drill ball it stays near
+    exp(-ball height / AERIAL_REACH); only leaving the ground takes it higher."""
+    return float(np.exp(-np.linalg.norm(np.asarray(ball_pos, dtype=np.float64)
+                                        - np.asarray(car_pos, dtype=np.float64)) / AERIAL_REACH))
 
 
 def wall_distance(x, y):
@@ -236,7 +255,13 @@ class NextoStyleReward(RewardFunction):
         self.last_paid = {a: -10**9 for a in agents}
         self.field_reset_next = False
         self.practice = shared_info.get("start") == "defend_shot"
-        self.practice_first_step = self.practice
+        self.aerial_team = aerial_team(initial_state) if shared_info.get("start") == "aerial" else None
+        self.aerialer = None  # the drilled car: the nearest to the ball at the start
+        if self.aerial_team is not None:
+            ball = initial_state.ball.position
+            self.aerialer = min(agents, key=lambda a: float(np.linalg.norm(initial_state.cars[a].physics.position - ball)))
+            self.prev_aerial_phi = aerial_potential(initial_state.cars[self.aerialer].physics.position, ball)
+        self.practice_first_step = self.practice or self.aerial_team is not None
 
     def _raw(self, agents, state, shared_info, terminal=False):
         idx = {n: i for i, n in enumerate(self.weights)}
@@ -291,11 +316,20 @@ class NextoStyleReward(RewardFunction):
                     r[idx["shot_touch"]] = 1.0
                     if not enters_net(slices, team, SHOT_HORIZON):
                         r[idx["practice_defended"]] = 1.0
+            if team == self.aerial_team:
+                r[idx["aerial_shot"]] = float(self.practice_first_step)
+                r[idx["aerial_level"]] = 1.0 + float(shared_info.get("aerial_level", 0.0))
+                r[idx["aerial_hit"]] = float(touching and not self.in_contact[a] and not car.on_ground
+                                             and ball_pos[2] >= AERIAL_MIN_Z)
+            if a == self.aerialer and moved:
+                phi_air = aerial_potential(pos, ball_pos)
+                r[idx["aerial_approach"]] = g * end * phi_air - self.prev_aerial_phi
+                self.prev_aerial_phi = phi_air
             if touching and not field_reset:
                 if not self.in_contact[a] and state.tick_count - self.last_paid[a] >= TOUCH_COOLDOWN_TICKS:
                     self.last_paid[a] = state.tick_count
                     r[idx["touch"]] = hit
-                    if not car.on_ground:
+                    if not car.on_ground and ball_pos[2] >= AERIAL_MIN_Z:
                         r[idx["air_touch"]] = air_touch_value(pos, ball_pos)
                     if in_third(self.prev_ball_pos, team) and not leaves_third(self.prev_slices, team, CLEAR_HORIZON) \
                             and leaves_third(slices, team, CLEAR_HORIZON):

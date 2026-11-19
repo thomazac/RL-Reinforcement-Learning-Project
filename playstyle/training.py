@@ -220,6 +220,10 @@ def phase_1b_metrics(tp, weights):
         shots = rates["practice_shot"] / 2  # flagged for both defenders
         play["Practice Defended Rate"] = rates["practice_defended"] / shots if shots else 0.0
         play["Practice Level"] = max(medians["practice_level"] - 1.0, 0.0) if rates["practice_level"] else 0.0
+    if "aerial_shot" in rates:
+        drills = rates["aerial_shot"] / 2  # flagged for both cars of the practicing team
+        play["Aerial Practice Hit Rate"] = rates["aerial_hit"] / drills if drills else 0.0
+        play["Aerial Level"] = max(medians["aerial_level"] - 1.0, 0.0) if rates["aerial_level"] else 0.0
     return {"Per 5 Minutes (weighted, per car)": per5, "Per 5 Minutes (events)": events, "Play": play}
 
 
@@ -263,7 +267,19 @@ class RunLogger(PPOMetricsLogger):
             self.warnings.append(f"observation jump {tp.largest_obs_jump:.3f}, {tp.nonfinite_obs} non-finite values")
 
     def report_metrics(self):
-        super().report_metrics()
+        m = self.get_metrics()
+        ppo, events, play = m.get("PPO Metrics", {}), m.get("Per 5 Minutes (events)", {}), m.get("Play", {})
+        line = (f"{m['Timestep Collection']['Cumulative Timesteps']:>13,} steps"
+                f" | {m['Timing']['Overall Steps per Second']:>6,.0f} sps"
+                f" | critic {ppo.get('Critic Loss', 0):.4f} kl {ppo.get('Mean KL Divergence', 0):.4f}"
+                f" ent {ppo.get('Actor Entropy', 0):.3f}")
+        if events:
+            line += (f" | goals/5min {events['Goals (both teams)']:.1f} saves {events['Saves per Player']:.2f}"
+                     f" | both near {play.get('Both Teammates Near Ball Share', 0):.1%}"
+                     f" double {play['Double-Commit Share']:.1%}")
+        if "Aerial Practice Hit Rate" in play:
+            line += f" | aerial hit {play['Aerial Practice Hit Rate']:.0%} lvl {play['Aerial Level']:.1f}"
+        print(line, flush=True)
         for w in self.warnings:
             print(f"WARNING: {w}")
         if self.path is not None:

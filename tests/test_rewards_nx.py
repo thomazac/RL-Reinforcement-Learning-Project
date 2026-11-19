@@ -281,6 +281,40 @@ def test_air_touch_needs_the_car_airborne(rig):
     assert rig.step()["blue-0"]["air_touch"] > 0.05
 
 
+def test_jump_touches_pay_no_air_touch():
+    from playstyle.states import AERIAL_MIN_Z
+    rig = Rig()
+    car = rig.state.cars["blue-0"]
+    car.ball_touches, car.on_ground = 1, False
+    car.physics.position = np.array([0, -150, 250], dtype=np.float32)
+    rig.ball(pos=(0, 0, AERIAL_MIN_Z - 20), vel=(0, 2000, 0))
+    r = rig.step()["blue-0"]
+    assert r["touch"] > 0 and r["air_touch"] == 0
+
+
+def test_aerial_drills_log_shots_levels_and_hits_for_the_practicing_team():
+    rig = Rig()
+    rig.ball(pos=(-1900, -2500, 900))  # nearest blue-0 at (-2000, -3000): blue practices
+    rig.info.update(start="aerial", aerial_level=0.3)
+    rig.fn.reset(rig.agents, rig.state, rig.info)
+    first = rig.step()
+    assert first["blue-0"]["aerial_shot"] == 1 and first["blue-1"]["aerial_shot"] == 1
+    assert first["orange-0"]["aerial_shot"] == 0 and first["blue-0"]["aerial_level"] == pytest.approx(1.3)
+    assert -0.01 < first["blue-0"]["aerial_approach"] <= 0  # standing still: only the discount
+    assert all(first[a]["aerial_approach"] == 0 for a in rig.agents if a != "blue-0")  # only the drilled car
+    car = rig.state.cars["blue-0"]
+    car.physics.position = np.array([-1900, -2500, 17], dtype=np.float32)  # drove under the ball
+    under = rig.step()["blue-0"]["aerial_approach"]
+    car.physics.position = np.array([-1900, -2500, 600], dtype=np.float32)  # jumped up toward it
+    up = rig.step()["blue-0"]["aerial_approach"]
+    assert up > under > 0 and up > 0.3
+    car.ball_touches, car.on_ground = 1, False
+    car.physics.position = np.array([-1900, -2650, 820], dtype=np.float32)
+    r = rig.step()
+    assert r["blue-0"]["aerial_shot"] == 0 and r["blue-0"]["aerial_hit"] == 1 and r["blue-0"]["air_touch"] > 0.3
+    assert sum(r[a]["aerial_hit"] for a in rig.agents) == 1
+
+
 def test_build_env_phase_nx():
     env = build_env(phase="nx", team_spirit=0.4)
     env.reset()
